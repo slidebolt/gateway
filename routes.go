@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -440,7 +441,7 @@ func registerSearchRoutes(r *gin.Engine) {
 		if pattern == "" {
 			pattern = "*"
 		}
-		query := types.SearchQuery{Pattern: pattern}
+		query := types.SearchQuery{Pattern: pattern, Labels: parseLabels(c.QueryArray("label"))}
 		data, _ := json.Marshal(query)
 		results := make([]types.Device, 0)
 		sub, _ := nc.SubscribeSync(nats.NewInbox())
@@ -457,6 +458,39 @@ func registerSearchRoutes(r *gin.Engine) {
 		}
 		c.JSON(http.StatusOK, results)
 	})
+
+	r.GET("/api/search/entities", func(c *gin.Context) {
+		query := types.SearchQuery{Pattern: "*", Labels: parseLabels(c.QueryArray("label"))}
+		data, _ := json.Marshal(query)
+		results := make([]types.Entity, 0)
+		sub, _ := nc.SubscribeSync(nats.NewInbox())
+		nc.PublishRequest(runner.SubjectSearchEntities, sub.Subject, data)
+		start := time.Now()
+		for time.Since(start) < 500*time.Millisecond {
+			msg, err := sub.NextMsg(100 * time.Millisecond)
+			if err != nil {
+				break
+			}
+			var e []types.Entity
+			json.Unmarshal(msg.Data, &e)
+			results = append(results, e...)
+		}
+		c.JSON(http.StatusOK, results)
+	})
+}
+
+func parseLabels(pairs []string) map[string]string {
+	if len(pairs) == 0 {
+		return nil
+	}
+	labels := make(map[string]string, len(pairs))
+	for _, p := range pairs {
+		k, v, ok := strings.Cut(p, ":")
+		if ok {
+			labels[k] = v
+		}
+	}
+	return labels
 }
 
 func eventJournalHandler(c *gin.Context) {

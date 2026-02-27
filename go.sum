@@ -58,10 +58,10 @@ github.com/quic-go/quic-go v0.54.0 h1:6s1YB9QotYI6Ospeiguknbp2Znb/jZYjZLRXn9kMQB
 github.com/quic-go/quic-go v0.54.0/go.mod h1:e68ZEaCdyviluZmy44P6Iey98v/Wfz6HCjQEm+l8zTY=
 github.com/slidebolt/sdk-entities v0.0.1 h1:zdrp0v1cGQ8dncYrjBPYbYGZMW0htm8gZ/3XRFHqt5Q=
 github.com/slidebolt/sdk-entities v0.0.1/go.mod h1:W+ShMWEvPTtuQv1uELqwceG+4JdvAAkG+e7b2b3ND6s=
-github.com/slidebolt/sdk-runner v0.0.1 h1:sriaoZFnqnGVSHfEPeCkH5qZHQBydYgJEQ/ZVbeJxTI=
-github.com/slidebolt/sdk-runner v0.0.1/go.mod h1:DdeA31BPRO9YM6I/1bTJ5tKm+AdDSjZZwfo+uanrCbE=
-github.com/slidebolt/sdk-types v0.0.1 h1:mnR787XwAY6y4KNAWZDQ11P/dflFsNLVgaBIzEmb8XY=
-github.com/slidebolt/sdk-types v0.0.1/go.mod h1:/hqN6E9IAc5mm4Nx4DGfIidoKgELdPHfr30uSdNRgTM=
+github.com/slidebolt/sdk-runner v0.0.4 h1:18IWfczOW4kFl0od++3Z1uX15ThcHJvvmDFMnkNWiQ0=
+github.com/slidebolt/sdk-runner v0.0.4/go.mod h1:wLvQNC7dNzA8rqmEy4dHhuCeoybH03yjtPa9rqQgkrY=
+github.com/slidebolt/sdk-types v0.0.3 h1:pAMTg4hECguxNOJnFgDgRQVj3/IQvbXs7u/TcBHW9Rs=
+github.com/slidebolt/sdk-types v0.0.3/go.mod h1:/hqN6E9IAc5mm4Nx4DGfIidoKgELdPHfr30uSdNRgTM=
 github.com/stretchr/objx v0.1.0/go.mod h1:HFkY916IF+rwdDfMAkV7OtwuqBVzrE8GR6GFx+wExME=
 github.com/stretchr/objx v0.4.0/go.mod h1:YvHI0jy2hoMjB+UWwv71VJQ9isScKT/TqJzVSSt89Yw=
 github.com/stretchr/objx v0.5.0/go.mod h1:Yh+to48EsGEfYuaHDzXPcE3xhTkx73EhmCGUpEOglKo=
@@ -75,6 +75,8 @@ github.com/twitchyliquid64/golang-asm v0.15.1 h1:SU5vSMR7hnwNxj24w34ZyCi/FmDZTkS
 github.com/twitchyliquid64/golang-asm v0.15.1/go.mod h1:a1lVb/DtPvCB8fslRZhAngC2+aY1QWCk3Cedj/Gdt08=
 github.com/ugorji/go/codec v1.3.0 h1:Qd2W2sQawAfG8XSvzwhBeoGq71zXOC/Q1E9y/wUcsUA=
 github.com/ugorji/go/codec v1.3.0/go.mod h1:pRBVtBSKl77K30Bv8R2P+cLSGaTtex6fsA2Wjqmfxj4=
+github.com/yuin/gopher-lua v1.1.1 h1:kYKnWBjvbNP4XLT3+bPEwAXJx262OhaHDWDVOPjL46M=
+github.com/yuin/gopher-lua v1.1.1/go.mod h1:GBR0iDaNXjAgGg9zfCvksxSRnQx76gclCIb7kdAd1Pw=
 go.uber.org/mock v0.5.0 h1:KAMbZvZPyBPWgD14IrIQ38QCyjwpvVVV6K/bHl1IwQU=
 go.uber.org/mock v0.5.0/go.mod h1:ge71pBPLYDk7QIi1LupWxdAykm7KIEFchiOqd6z7qMM=
 golang.org/x/arch v0.20.0 h1:dx1zTU0MAE98U+TQ8BLl7XsJbgze2WnNKF/8tGp/Q6c=
