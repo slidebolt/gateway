@@ -23,6 +23,7 @@ func registerRoutes(r *gin.Engine) {
 	registerCommandRoutes(r)
 	registerEventRoutes(r)
 	registerSearchRoutes(r)
+	registerSchemaRoutes(r)
 	r.GET("/api/journal/events", eventJournalHandler)
 }
 
@@ -98,6 +99,46 @@ func registerDeviceRoutes(r *gin.Engine) {
 	})
 }
 
+type entityWithSchema struct {
+	types.Entity
+	Schema *types.DomainDescriptor `json:"schema,omitempty"`
+}
+
+func withSchema(entities []types.Entity) []entityWithSchema {
+	out := make([]entityWithSchema, len(entities))
+	for i, e := range entities {
+		r := entityWithSchema{Entity: e}
+		if desc, ok := types.GetDomainDescriptor(e.Domain); ok {
+			filtered := filterDescriptor(desc, e.Actions)
+			r.Schema = &filtered
+		}
+		out[i] = r
+	}
+	return out
+}
+
+func filterDescriptor(desc types.DomainDescriptor, actions []string) types.DomainDescriptor {
+	if len(actions) == 0 {
+		return desc
+	}
+	allowed := make(map[string]bool, len(actions))
+	for _, a := range actions {
+		allowed[a] = true
+	}
+	filtered := types.DomainDescriptor{Domain: desc.Domain}
+	for _, cmd := range desc.Commands {
+		if allowed[cmd.Action] {
+			filtered.Commands = append(filtered.Commands, cmd)
+		}
+	}
+	for _, evt := range desc.Events {
+		if allowed[evt.Action] {
+			filtered.Events = append(filtered.Events, evt)
+		}
+	}
+	return filtered
+}
+
 func registerEntityRoutes(r *gin.Engine) {
 	r.GET("/api/plugins/:id/devices/:device_id/entities", func(c *gin.Context) {
 		pluginID := c.Param("id")
@@ -115,7 +156,7 @@ func registerEntityRoutes(r *gin.Engine) {
 			}
 		}
 		vstore.mu.RUnlock()
-		c.JSON(http.StatusOK, entities)
+		c.JSON(http.StatusOK, withSchema(entities))
 	})
 
 	r.POST("/api/plugins/:id/devices/:device_id/entities", func(c *gin.Context) {
@@ -513,4 +554,19 @@ func eventJournalHandler(c *gin.Context) {
 		out = append(out, evt)
 	}
 	c.JSON(http.StatusOK, out)
+}
+
+func registerSchemaRoutes(r *gin.Engine) {
+	r.GET("/api/schema/domains", func(c *gin.Context) {
+		c.JSON(http.StatusOK, types.AllDomainDescriptors())
+	})
+
+	r.GET("/api/schema/domains/:domain", func(c *gin.Context) {
+		desc, ok := types.GetDomainDescriptor(c.Param("domain"))
+		if !ok {
+			c.JSON(http.StatusNotFound, gin.H{"error": "unknown domain"})
+			return
+		}
+		c.JSON(http.StatusOK, desc)
+	})
 }

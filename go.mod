@@ -5,9 +5,9 @@ go 1.25.7
 require (
 	github.com/gin-gonic/gin v1.11.0
 	github.com/nats-io/nats.go v1.49.0
-	github.com/slidebolt/sdk-entities v0.0.1
+	github.com/slidebolt/sdk-entities v0.0.4
 	github.com/slidebolt/sdk-runner v0.0.4
-	github.com/slidebolt/sdk-types v0.0.3
+	github.com/slidebolt/sdk-types v0.0.4
 )
 
 require (
