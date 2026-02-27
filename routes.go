@@ -18,6 +18,7 @@ func registerRoutes(r *gin.Engine) {
 	r.GET("/api/plugins", pluginsHandler)
 	registerDeviceRoutes(r)
 	registerEntityRoutes(r)
+	registerScriptRoutes(r)
 	registerCommandRoutes(r)
 	registerEventRoutes(r)
 	registerSearchRoutes(r)
@@ -97,9 +98,9 @@ func registerDeviceRoutes(r *gin.Engine) {
 }
 
 func registerEntityRoutes(r *gin.Engine) {
-	r.GET("/api/plugins/:id/devices/:did/entities", func(c *gin.Context) {
+	r.GET("/api/plugins/:id/devices/:device_id/entities", func(c *gin.Context) {
 		pluginID := c.Param("id")
-		deviceID := c.Param("did")
+		deviceID := c.Param("device_id")
 		resp := routeRPC(pluginID, "entities/list", gin.H{"device_id": deviceID})
 		entities, err := parseEntities(resp)
 		if err != nil {
@@ -116,13 +117,13 @@ func registerEntityRoutes(r *gin.Engine) {
 		c.JSON(http.StatusOK, entities)
 	})
 
-	r.POST("/api/plugins/:id/devices/:did/entities", func(c *gin.Context) {
+	r.POST("/api/plugins/:id/devices/:device_id/entities", func(c *gin.Context) {
 		var ent types.Entity
 		if err := c.ShouldBindJSON(&ent); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
-		ent.DeviceID = c.Param("did")
+		ent.DeviceID = c.Param("device_id")
 		resp := routeRPC(c.Param("id"), "entities/create", ent)
 		if resp.Error != nil {
 			c.JSON(http.StatusForbidden, resp.Error)
@@ -131,12 +132,89 @@ func registerEntityRoutes(r *gin.Engine) {
 		c.JSON(http.StatusOK, resp.Result)
 	})
 
-	r.POST("/api/plugins/:id/devices/:did/entities/virtual", createVirtualEntityHandler)
+	r.POST("/api/plugins/:id/devices/:device_id/entities/virtual", createVirtualEntityHandler)
+}
+
+func registerScriptRoutes(r *gin.Engine) {
+	r.GET("/api/plugins/:id/devices/:device_id/entities/:entity_id/script", func(c *gin.Context) {
+		params := gin.H{"device_id": c.Param("device_id"), "entity_id": c.Param("entity_id")}
+		resp := routeRPC(c.Param("id"), "scripts/get", params)
+		if resp.Error != nil {
+			c.JSON(http.StatusForbidden, resp.Error)
+			return
+		}
+		c.JSON(http.StatusOK, resp.Result)
+	})
+
+	r.PUT("/api/plugins/:id/devices/:device_id/entities/:entity_id/script", func(c *gin.Context) {
+		var req struct {
+			Source string `json:"source"`
+		}
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		params := gin.H{"device_id": c.Param("device_id"), "entity_id": c.Param("entity_id"), "source": req.Source}
+		resp := routeRPC(c.Param("id"), "scripts/put", params)
+		if resp.Error != nil {
+			c.JSON(http.StatusForbidden, resp.Error)
+			return
+		}
+		c.JSON(http.StatusOK, resp.Result)
+	})
+
+	r.DELETE("/api/plugins/:id/devices/:device_id/entities/:entity_id/script", func(c *gin.Context) {
+		purge := c.Query("purge_state") == "true"
+		params := gin.H{"device_id": c.Param("device_id"), "entity_id": c.Param("entity_id"), "purge_state": purge}
+		resp := routeRPC(c.Param("id"), "scripts/delete", params)
+		if resp.Error != nil {
+			c.JSON(http.StatusForbidden, resp.Error)
+			return
+		}
+		c.JSON(http.StatusOK, resp.Result)
+	})
+
+	r.GET("/api/plugins/:id/devices/:device_id/entities/:entity_id/script/state", func(c *gin.Context) {
+		params := gin.H{"device_id": c.Param("device_id"), "entity_id": c.Param("entity_id")}
+		resp := routeRPC(c.Param("id"), "scripts/state/get", params)
+		if resp.Error != nil {
+			c.JSON(http.StatusForbidden, resp.Error)
+			return
+		}
+		c.JSON(http.StatusOK, resp.Result)
+	})
+
+	r.PUT("/api/plugins/:id/devices/:device_id/entities/:entity_id/script/state", func(c *gin.Context) {
+		var req struct {
+			State map[string]any `json:"state"`
+		}
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		params := gin.H{"device_id": c.Param("device_id"), "entity_id": c.Param("entity_id"), "state": req.State}
+		resp := routeRPC(c.Param("id"), "scripts/state/put", params)
+		if resp.Error != nil {
+			c.JSON(http.StatusForbidden, resp.Error)
+			return
+		}
+		c.JSON(http.StatusOK, resp.Result)
+	})
+
+	r.DELETE("/api/plugins/:id/devices/:device_id/entities/:entity_id/script/state", func(c *gin.Context) {
+		params := gin.H{"device_id": c.Param("device_id"), "entity_id": c.Param("entity_id")}
+		resp := routeRPC(c.Param("id"), "scripts/state/delete", params)
+		if resp.Error != nil {
+			c.JSON(http.StatusForbidden, resp.Error)
+			return
+		}
+		c.JSON(http.StatusOK, resp.Result)
+	})
 }
 
 func createVirtualEntityHandler(c *gin.Context) {
 	pluginID := c.Param("id")
-	deviceID := c.Param("did")
+	deviceID := c.Param("device_id")
 	var req struct {
 		ID             string   `json:"id"`
 		LocalName      string   `json:"local_name"`
@@ -204,10 +282,10 @@ func createVirtualEntityHandler(c *gin.Context) {
 }
 
 func registerCommandRoutes(r *gin.Engine) {
-	r.POST("/api/plugins/:id/devices/:did/entities/:eid/commands", func(c *gin.Context) {
+	r.POST("/api/plugins/:id/devices/:device_id/entities/:entity_id/commands", func(c *gin.Context) {
 		pluginID := c.Param("id")
-		deviceID := c.Param("did")
-		entityID := c.Param("eid")
+		deviceID := c.Param("device_id")
+		entityID := c.Param("entity_id")
 		var payload json.RawMessage
 		if err := c.ShouldBindJSON(&payload); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -286,10 +364,10 @@ func registerCommandRoutes(r *gin.Engine) {
 }
 
 func registerEventRoutes(r *gin.Engine) {
-	r.POST("/api/plugins/:id/devices/:did/entities/:eid/events", func(c *gin.Context) {
+	r.POST("/api/plugins/:id/devices/:device_id/entities/:entity_id/events", func(c *gin.Context) {
 		pluginID := c.Param("id")
-		deviceID := c.Param("did")
-		entityID := c.Param("eid")
+		deviceID := c.Param("device_id")
+		entityID := c.Param("entity_id")
 		var payload json.RawMessage
 		if err := c.ShouldBindJSON(&payload); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
