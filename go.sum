@@ -58,8 +58,8 @@ github.com/quic-go/quic-go v0.54.0 h1:6s1YB9QotYI6Ospeiguknbp2Znb/jZYjZLRXn9kMQB
 github.com/quic-go/quic-go v0.54.0/go.mod h1:e68ZEaCdyviluZmy44P6Iey98v/Wfz6HCjQEm+l8zTY=
 github.com/slidebolt/sdk-entities v0.0.4 h1:v4AUKAd/2cuSw5W5/GRrIV8Y9j5QuiAnjfTJEH6755Y=
 github.com/slidebolt/sdk-entities v0.0.4/go.mod h1:sZ/dIpxkXwaBPfF3X2AuXYkPmJ6+pC7eTqISBk2exqg=
-github.com/slidebolt/sdk-runner v0.0.4 h1:18IWfczOW4kFl0od++3Z1uX15ThcHJvvmDFMnkNWiQ0=
-github.com/slidebolt/sdk-runner v0.0.4/go.mod h1:wLvQNC7dNzA8rqmEy4dHhuCeoybH03yjtPa9rqQgkrY=
+github.com/slidebolt/sdk-runner v0.0.5 h1:booXA7AOfpI5no23o6ZtB+q13SMnRrIk1o+FGM9OxKI=
+github.com/slidebolt/sdk-runner v0.0.5/go.mod h1:wLvQNC7dNzA8rqmEy4dHhuCeoybH03yjtPa9rqQgkrY=
 github.com/slidebolt/sdk-types v0.0.4 h1:703BheWIxJpXS8ZRQBjEMyf1QoSff4hwRkpFhak/E5M=
 github.com/slidebolt/sdk-types v0.0.4/go.mod h1:/hqN6E9IAc5mm4Nx4DGfIidoKgELdPHfr30uSdNRgTM=
 github.com/stretchr/objx v0.1.0/go.mod h1:HFkY916IF+rwdDfMAkV7OtwuqBVzrE8GR6GFx+wExME=
