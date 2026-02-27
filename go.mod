@@ -5,9 +5,9 @@ go 1.25.7
 require (
 	github.com/gin-gonic/gin v1.11.0
 	github.com/nats-io/nats.go v1.49.0
-	github.com/slidebolt/sdk-entities v0.0.0
-	github.com/slidebolt/sdk-runner v0.0.0
-	github.com/slidebolt/sdk-types v0.0.0
+	github.com/slidebolt/sdk-entities v0.0.1
+	github.com/slidebolt/sdk-runner v0.0.1
+	github.com/slidebolt/sdk-types v0.0.1
 )
 
 require (
@@ -47,8 +47,3 @@ require (
 	google.golang.org/protobuf v1.36.9 // indirect
 )
 
-replace (
-	github.com/slidebolt/sdk-entities => ../sdk-entities
-	github.com/slidebolt/sdk-runner => ../sdk-runner
-	github.com/slidebolt/sdk-types => ../sdk-types
-)
