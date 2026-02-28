@@ -7,7 +7,7 @@ require (
 	github.com/mark3labs/mcp-go v0.44.1
 	github.com/nats-io/nats.go v1.49.0
 	github.com/slidebolt/sdk-entities v1.1.0
-	github.com/slidebolt/sdk-runner v1.1.0
+	github.com/slidebolt/sdk-runner v1.2.1
 	github.com/slidebolt/sdk-types v1.1.0
 )
 

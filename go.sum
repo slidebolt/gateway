@@ -82,8 +82,8 @@ github.com/rogpeppe/go-internal v1.10.0 h1:TMyTOH3F/DB16zRVcYyreMH6GnZZrwQVAoYjR
 github.com/rogpeppe/go-internal v1.10.0/go.mod h1:UQnix2H7Ngw/k4C5ijL5+65zddjncjaFoBhdsK/akog=
 github.com/slidebolt/sdk-entities v1.1.0 h1:QYYRPOXz1VVyF2iwYCnkU9IUjWtvQ8yPyBPckHUrdWE=
 github.com/slidebolt/sdk-entities v1.1.0/go.mod h1:sZ/dIpxkXwaBPfF3X2AuXYkPmJ6+pC7eTqISBk2exqg=
-github.com/slidebolt/sdk-runner v1.1.0 h1:GWUZVZgp09uj8Nqw0dtQBlgpEW+9BAS9lEd9sPmRIRk=
-github.com/slidebolt/sdk-runner v1.1.0/go.mod h1:GXMvpH0NL1j0MPY3KWqktaGntIDO2LhW7zN9TarsxVM=
+github.com/slidebolt/sdk-runner v1.2.1 h1:Fd2FGXpDtOX9yGV7mlgXK6bMWUCkURvx9fuN1zltvFM=
+github.com/slidebolt/sdk-runner v1.2.1/go.mod h1:nyfCH3W9iIYnLdD+c12LhIRNfECzAxNOHei2Jro6ORU=
 github.com/slidebolt/sdk-types v1.1.0 h1:skar8e6euxhT3vjSvlkjiY9FE2QcmVKhYgoRdMA5wfk=
 github.com/slidebolt/sdk-types v1.1.0/go.mod h1:/hqN6E9IAc5mm4Nx4DGfIidoKgELdPHfr30uSdNRgTM=
 github.com/spf13/cast v1.7.1 h1:cuNEagBQEHWN1FnbGEjCXL2szYEXqfJPbP2HNUaca9Y=
