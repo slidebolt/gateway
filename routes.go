@@ -26,6 +26,18 @@ func registerRoutes(r *gin.Engine) {
 	registerSchemaRoutes(r)
 	registerBatchRoutes(r)
 	r.GET("/api/journal/events", eventJournalHandler)
+	r.GET("/_internal/routes", func(c *gin.Context) {
+		type routeEntry struct {
+			Method  string `json:"method"`
+			Path    string `json:"path"`
+		}
+		routes := r.Routes()
+		out := make([]routeEntry, len(routes))
+		for i, rt := range routes {
+			out[i] = routeEntry{Method: rt.Method, Path: rt.Path}
+		}
+		c.JSON(http.StatusOK, out)
+	})
 }
 
 func runtimeInfoHandler(c *gin.Context) {
