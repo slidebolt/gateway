@@ -69,6 +69,11 @@ func run() {
 		}
 	}()
 
+	// Start MCP bridge over Stdio
+	// This allows the gateway binary to be used directly by Claude/LLMs as an MCP server.
+	mcpBridge := NewMCPBridge()
+	go mcpBridge.Serve()
+
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
