@@ -1,10 +1,14 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"log"
+	"net/http"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -46,7 +50,31 @@ func run() {
 
 	r := gin.Default()
 	registerRoutes(r)
-	r.Run(":" + apiPort)
+
+	srv := &http.Server{
+		Addr:    apiHost + ":" + apiPort,
+		Handler: r,
+	}
+
+	go func() {
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("listen: %s\n", err)
+		}
+	}()
+
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	<-quit
+	log.Println("Shutting down gateway...")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(ctx); err != nil {
+		log.Printf("Gateway shutdown error: %v", err)
+	}
+
+	_ = nc.Drain()
+	log.Println("Gateway exiting")
 }
 
 func subscribeRegistry() {
