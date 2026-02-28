@@ -24,6 +24,7 @@ func registerRoutes(r *gin.Engine) {
 	registerEventRoutes(r)
 	registerSearchRoutes(r)
 	registerSchemaRoutes(r)
+	registerBatchRoutes(r)
 	r.GET("/api/journal/events", eventJournalHandler)
 }
 
@@ -167,6 +168,31 @@ func registerEntityRoutes(r *gin.Engine) {
 		}
 		ent.DeviceID = c.Param("device_id")
 		resp := routeRPC(c.Param("id"), "entities/create", ent)
+		if resp.Error != nil {
+			c.JSON(http.StatusForbidden, resp.Error)
+			return
+		}
+		c.JSON(http.StatusOK, resp.Result)
+	})
+
+	r.PUT("/api/plugins/:id/devices/:device_id/entities", func(c *gin.Context) {
+		var ent types.Entity
+		if err := c.ShouldBindJSON(&ent); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		ent.DeviceID = c.Param("device_id")
+		resp := routeRPC(c.Param("id"), "entities/update", ent)
+		if resp.Error != nil {
+			c.JSON(http.StatusForbidden, resp.Error)
+			return
+		}
+		c.JSON(http.StatusOK, resp.Result)
+	})
+
+	r.DELETE("/api/plugins/:id/devices/:device_id/entities/:entity_id", func(c *gin.Context) {
+		params := gin.H{"device_id": c.Param("device_id"), "entity_id": c.Param("entity_id")}
+		resp := routeRPC(c.Param("id"), "entities/delete", params)
 		if resp.Error != nil {
 			c.JSON(http.StatusForbidden, resp.Error)
 			return
