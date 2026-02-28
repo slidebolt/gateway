@@ -37,9 +37,16 @@ func run() {
 	writeRuntimeDescriptor(apiHost, apiPort, natsURL, gatewayID)
 
 	var err error
-	nc, err = nats.Connect(natsURL)
+	for i := 0; i < 10; i++ {
+		nc, err = nats.Connect(natsURL)
+		if err == nil {
+			break
+		}
+		log.Printf("Gateway: NATS connect failed (attempt %d/10): %v", i+1, err)
+		time.Sleep(time.Second)
+	}
 	if err != nil {
-		log.Fatal(err)
+		log.Fatalf("Gateway: failed to connect to NATS after 10 attempts: %v", err)
 	}
 	defer nc.Close()
 
