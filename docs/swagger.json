@@ -1,0 +1,95 @@
+{
+    "schemes": [
+        "http",
+        "https"
+    ],
+    "swagger": "2.0",
+    "info": {
+        "description": "REST API for managing plugins, devices, entities, and automation",
+        "title": "SlideBolt Gateway API",
+        "contact": {
+            "name": "SlideBolt Support",
+            "url": "https://github.com/slidebolt"
+        },
+        "license": {
+            "name": "Apache 2.0",
+            "url": "https://opensource.org/licenses/Apache-2.0"
+        },
+        "version": "1.0.0"
+    },
+    "basePath": "/",
+    "paths": {
+        "/_internal/runtime": {
+            "get": {
+                "description": "Get gateway runtime information",
+                "summary": "Runtime information",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/main.Response"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/plugins": {
+            "get": {
+                "description": "Get information about all registered plugins",
+                "summary": "List registered plugins",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/main.Response"
+                        }
+                    }
+                }
+            }
+        },
+        "/health": {
+            "get": {
+                "description": "Check if the gateway or a specific plugin is healthy",
+                "summary": "Health check",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Plugin ID for plugin-specific health check",
+                        "name": "id",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/main.Response"
+                        }
+                    },
+                    "503": {
+                        "description": "Service unavailable",
+                        "schema": {
+                            "$ref": "#/definitions/main.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        }
+    },
+    "definitions": {
+        "main.ErrorResponse": {
+            "type": "object",
+            "properties": {
+                "error": {
+                    "type": "string"
+                }
+            }
+        },
+        "main.Response": {
+            "type": "object",
+            "properties": {
+                "data": {}
+            }
+        }
+    }
+}

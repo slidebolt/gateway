@@ -1,0 +1,62 @@
+basePath: /
+definitions:
+  main.ErrorResponse:
+    properties:
+      error:
+        type: string
+    type: object
+  main.Response:
+    properties:
+      data: {}
+    type: object
+info:
+  contact:
+    name: SlideBolt Support
+    url: https://github.com/slidebolt
+  description: REST API for managing plugins, devices, entities, and automation
+  license:
+    name: Apache 2.0
+    url: https://opensource.org/licenses/Apache-2.0
+  title: SlideBolt Gateway API
+  version: 1.0.0
+paths:
+  /_internal/runtime:
+    get:
+      description: Get gateway runtime information
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/main.Response'
+      summary: Runtime information
+  /api/plugins:
+    get:
+      description: Get information about all registered plugins
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/main.Response'
+      summary: List registered plugins
+  /health:
+    get:
+      description: Check if the gateway or a specific plugin is healthy
+      parameters:
+      - description: Plugin ID for plugin-specific health check
+        in: query
+        name: id
+        type: string
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/main.Response'
+        "503":
+          description: Service unavailable
+          schema:
+            $ref: '#/definitions/main.ErrorResponse'
+      summary: Health check
+schemes:
+- http
+- https
+swagger: "2.0"

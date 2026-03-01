@@ -1,42 +1,161 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 
-	"github.com/gin-gonic/gin"
+	"github.com/danielgtaylor/huma/v2"
 	"github.com/slidebolt/sdk-types"
 )
 
-func registerBatchRoutes(r *gin.Engine) {
-	// --- Devices ---
-	r.POST("/api/batch/devices", batchGetDevices)
-	r.POST("/api/batch/devices/create", batchCreateDevices)
-	r.PUT("/api/batch/devices", batchUpdateDevices)
-	r.DELETE("/api/batch/devices", batchDeleteDevices)
+// ---------------------------------------------------------------------------
+// Batch input / output types
+// ---------------------------------------------------------------------------
 
-	// --- Entities ---
-	r.POST("/api/batch/entities", batchGetEntities)
-	r.POST("/api/batch/entities/create", batchCreateEntities)
-	r.PUT("/api/batch/entities", batchUpdateEntities)
-	r.DELETE("/api/batch/entities", batchDeleteEntities)
+type BatchGetDevicesInput struct {
+	Body []types.BatchDeviceRef `doc:"List of (plugin_id, device_id) pairs to fetch"`
+}
+type BatchGetDevicesOutput struct{ Body []types.BatchResult }
+
+type BatchCreateDevicesInput struct {
+	Body []types.BatchDeviceItem `doc:"List of (plugin_id, device) items to create"`
+}
+type BatchCreateDevicesOutput struct{ Body []types.BatchResult }
+
+type BatchUpdateDevicesInput struct {
+	Body []types.BatchDeviceItem `doc:"List of (plugin_id, device) items to update"`
+}
+type BatchUpdateDevicesOutput struct{ Body []types.BatchResult }
+
+type BatchDeleteDevicesInput struct {
+	Body []types.BatchDeviceRef `doc:"List of (plugin_id, device_id) pairs to delete"`
+}
+type BatchDeleteDevicesOutput struct{ Body []types.BatchResult }
+
+type BatchGetEntitiesInput struct {
+	Body []types.BatchEntityRef `doc:"List of (plugin_id, device_id, entity_id) triples to fetch"`
+}
+type BatchGetEntitiesOutput struct{ Body []types.BatchResult }
+
+type BatchCreateEntitiesInput struct {
+	Body []types.BatchEntityItem `doc:"List of (plugin_id, device_id, entity) items to create"`
+}
+type BatchCreateEntitiesOutput struct{ Body []types.BatchResult }
+
+type BatchUpdateEntitiesInput struct {
+	Body []types.BatchEntityItem `doc:"List of (plugin_id, device_id, entity) items to update"`
+}
+type BatchUpdateEntitiesOutput struct{ Body []types.BatchResult }
+
+type BatchDeleteEntitiesInput struct {
+	Body []types.BatchEntityRef `doc:"List of (plugin_id, device_id, entity_id) triples to delete"`
+}
+type BatchDeleteEntitiesOutput struct{ Body []types.BatchResult }
+
+// ---------------------------------------------------------------------------
+// Route registration
+// ---------------------------------------------------------------------------
+
+func registerBatchRoutes(api huma.API) {
+	huma.Register(api, huma.Operation{
+		OperationID: "batch-get-devices",
+		Method:      http.MethodPost,
+		Path:        "/api/batch/devices",
+		Summary:     "Fetch devices",
+		Description: "Fetches specific devices by (plugin_id, device_id). Groups requests by plugin for efficiency.",
+		Tags:        []string{"batch"},
+	}, func(ctx context.Context, input *BatchGetDevicesInput) (*BatchGetDevicesOutput, error) {
+		return &BatchGetDevicesOutput{Body: batchGetDevices(input.Body)}, nil
+	})
+
+	huma.Register(api, huma.Operation{
+		OperationID: "batch-create-devices",
+		Method:      http.MethodPost,
+		Path:        "/api/batch/devices/create",
+		Summary:     "Create devices",
+		Description: "Creates multiple devices across plugins in a single call.",
+		Tags:        []string{"batch"},
+	}, func(ctx context.Context, input *BatchCreateDevicesInput) (*BatchCreateDevicesOutput, error) {
+		return &BatchCreateDevicesOutput{Body: batchCreateDevices(input.Body)}, nil
+	})
+
+	huma.Register(api, huma.Operation{
+		OperationID: "batch-update-devices",
+		Method:      http.MethodPut,
+		Path:        "/api/batch/devices",
+		Summary:     "Update devices",
+		Description: "Updates multiple devices across plugins in a single call.",
+		Tags:        []string{"batch"},
+	}, func(ctx context.Context, input *BatchUpdateDevicesInput) (*BatchUpdateDevicesOutput, error) {
+		return &BatchUpdateDevicesOutput{Body: batchUpdateDevices(input.Body)}, nil
+	})
+
+	huma.Register(api, huma.Operation{
+		OperationID: "batch-delete-devices",
+		Method:      http.MethodDelete,
+		Path:        "/api/batch/devices",
+		Summary:     "Delete devices",
+		Description: "Deletes multiple devices across plugins. Pass device refs in the request body.",
+		Tags:        []string{"batch"},
+	}, func(ctx context.Context, input *BatchDeleteDevicesInput) (*BatchDeleteDevicesOutput, error) {
+		return &BatchDeleteDevicesOutput{Body: batchDeleteDevices(input.Body)}, nil
+	})
+
+	huma.Register(api, huma.Operation{
+		OperationID: "batch-get-entities",
+		Method:      http.MethodPost,
+		Path:        "/api/batch/entities",
+		Summary:     "Fetch entities",
+		Description: "Fetches specific entities by (plugin_id, device_id, entity_id). Groups requests by device for efficiency.",
+		Tags:        []string{"batch"},
+	}, func(ctx context.Context, input *BatchGetEntitiesInput) (*BatchGetEntitiesOutput, error) {
+		return &BatchGetEntitiesOutput{Body: batchGetEntities(input.Body)}, nil
+	})
+
+	huma.Register(api, huma.Operation{
+		OperationID: "batch-create-entities",
+		Method:      http.MethodPost,
+		Path:        "/api/batch/entities/create",
+		Summary:     "Create entities",
+		Description: "Creates multiple entities across plugins in a single call.",
+		Tags:        []string{"batch"},
+	}, func(ctx context.Context, input *BatchCreateEntitiesInput) (*BatchCreateEntitiesOutput, error) {
+		return &BatchCreateEntitiesOutput{Body: batchCreateEntities(input.Body)}, nil
+	})
+
+	huma.Register(api, huma.Operation{
+		OperationID: "batch-update-entities",
+		Method:      http.MethodPut,
+		Path:        "/api/batch/entities",
+		Summary:     "Update entities",
+		Description: "Updates multiple entities across plugins in a single call.",
+		Tags:        []string{"batch"},
+	}, func(ctx context.Context, input *BatchUpdateEntitiesInput) (*BatchUpdateEntitiesOutput, error) {
+		return &BatchUpdateEntitiesOutput{Body: batchUpdateEntities(input.Body)}, nil
+	})
+
+	huma.Register(api, huma.Operation{
+		OperationID: "batch-delete-entities",
+		Method:      http.MethodDelete,
+		Path:        "/api/batch/entities",
+		Summary:     "Delete entities",
+		Description: "Deletes multiple entities across plugins. Pass entity refs in the request body.",
+		Tags:        []string{"batch"},
+	}, func(ctx context.Context, input *BatchDeleteEntitiesInput) (*BatchDeleteEntitiesOutput, error) {
+		return &BatchDeleteEntitiesOutput{Body: batchDeleteEntities(input.Body)}, nil
+	})
 }
 
-// batchGetDevices fetches specific devices by plugin_id + device_id.
-func batchGetDevices(c *gin.Context) {
-	var refs []types.BatchDeviceRef
-	if err := c.ShouldBindJSON(&refs); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
+// ---------------------------------------------------------------------------
+// Handlers (logic unchanged from original batch.go)
+// ---------------------------------------------------------------------------
 
-	// Group refs by plugin so we only call each plugin once.
+func batchGetDevices(refs []types.BatchDeviceRef) []types.BatchResult {
 	byPlugin := map[string][]string{}
 	for _, ref := range refs {
 		byPlugin[ref.PluginID] = append(byPlugin[ref.PluginID], ref.DeviceID)
 	}
-
-	// Fetch all devices per plugin and index them.
 	index := map[string]types.Device{}
 	pluginErr := map[string]string{}
 	for pluginID, ids := range byPlugin {
@@ -58,7 +177,6 @@ func batchGetDevices(c *gin.Context) {
 			index[pluginID+"|"+d.ID] = d
 		}
 	}
-
 	results := make([]types.BatchResult, len(refs))
 	for i, ref := range refs {
 		key := ref.PluginID + "|" + ref.DeviceID
@@ -73,16 +191,10 @@ func batchGetDevices(c *gin.Context) {
 		}
 		results[i] = r
 	}
-	c.JSON(http.StatusOK, results)
+	return results
 }
 
-// batchCreateDevices creates multiple devices, each routed to its plugin.
-func batchCreateDevices(c *gin.Context) {
-	var items []types.BatchDeviceItem
-	if err := c.ShouldBindJSON(&items); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
+func batchCreateDevices(items []types.BatchDeviceItem) []types.BatchResult {
 	results := make([]types.BatchResult, len(items))
 	for i, item := range items {
 		r := types.BatchResult{PluginID: item.PluginID, DeviceID: item.Device.ID}
@@ -95,16 +207,10 @@ func batchCreateDevices(c *gin.Context) {
 		}
 		results[i] = r
 	}
-	c.JSON(http.StatusOK, results)
+	return results
 }
 
-// batchUpdateDevices updates multiple devices, each routed to its plugin.
-func batchUpdateDevices(c *gin.Context) {
-	var items []types.BatchDeviceItem
-	if err := c.ShouldBindJSON(&items); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
+func batchUpdateDevices(items []types.BatchDeviceItem) []types.BatchResult {
 	results := make([]types.BatchResult, len(items))
 	for i, item := range items {
 		r := types.BatchResult{PluginID: item.PluginID, DeviceID: item.Device.ID}
@@ -117,16 +223,10 @@ func batchUpdateDevices(c *gin.Context) {
 		}
 		results[i] = r
 	}
-	c.JSON(http.StatusOK, results)
+	return results
 }
 
-// batchDeleteDevices deletes multiple devices by plugin_id + device_id.
-func batchDeleteDevices(c *gin.Context) {
-	var refs []types.BatchDeviceRef
-	if err := c.ShouldBindJSON(&refs); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
+func batchDeleteDevices(refs []types.BatchDeviceRef) []types.BatchResult {
 	results := make([]types.BatchResult, len(refs))
 	for i, ref := range refs {
 		r := types.BatchResult{PluginID: ref.PluginID, DeviceID: ref.DeviceID}
@@ -138,29 +238,20 @@ func batchDeleteDevices(c *gin.Context) {
 		}
 		results[i] = r
 	}
-	c.JSON(http.StatusOK, results)
+	return results
 }
 
-// batchGetEntities fetches specific entities by plugin_id + device_id + entity_id.
-func batchGetEntities(c *gin.Context) {
-	var refs []types.BatchEntityRef
-	if err := c.ShouldBindJSON(&refs); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-
-	// Group refs by (plugin_id, device_id) so we only list once per device.
+func batchGetEntities(refs []types.BatchEntityRef) []types.BatchResult {
 	type deviceKey struct{ pluginID, deviceID string }
 	byDevice := map[deviceKey][]string{}
 	for _, ref := range refs {
 		k := deviceKey{ref.PluginID, ref.DeviceID}
 		byDevice[k] = append(byDevice[k], ref.EntityID)
 	}
-
 	index := map[string]types.Entity{}
 	deviceErr := map[string]string{}
 	for k := range byDevice {
-		resp := routeRPC(k.pluginID, "entities/list", gin.H{"device_id": k.deviceID})
+		resp := routeRPC(k.pluginID, "entities/list", map[string]string{"device_id": k.deviceID})
 		entities, err := parseEntities(resp)
 		if err != nil {
 			deviceErr[k.pluginID+"|"+k.deviceID] = err.Error()
@@ -170,7 +261,6 @@ func batchGetEntities(c *gin.Context) {
 			index[k.pluginID+"|"+k.deviceID+"|"+e.ID] = e
 		}
 	}
-
 	results := make([]types.BatchResult, len(refs))
 	for i, ref := range refs {
 		r := types.BatchResult{PluginID: ref.PluginID, DeviceID: ref.DeviceID, EntityID: ref.EntityID}
@@ -185,16 +275,10 @@ func batchGetEntities(c *gin.Context) {
 		}
 		results[i] = r
 	}
-	c.JSON(http.StatusOK, results)
+	return results
 }
 
-// batchCreateEntities creates multiple entities, each routed to its plugin.
-func batchCreateEntities(c *gin.Context) {
-	var items []types.BatchEntityItem
-	if err := c.ShouldBindJSON(&items); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
+func batchCreateEntities(items []types.BatchEntityItem) []types.BatchResult {
 	results := make([]types.BatchResult, len(items))
 	for i, item := range items {
 		item.Entity.DeviceID = item.DeviceID
@@ -208,16 +292,10 @@ func batchCreateEntities(c *gin.Context) {
 		}
 		results[i] = r
 	}
-	c.JSON(http.StatusOK, results)
+	return results
 }
 
-// batchUpdateEntities updates multiple entities, each routed to its plugin.
-func batchUpdateEntities(c *gin.Context) {
-	var items []types.BatchEntityItem
-	if err := c.ShouldBindJSON(&items); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
+func batchUpdateEntities(items []types.BatchEntityItem) []types.BatchResult {
 	results := make([]types.BatchResult, len(items))
 	for i, item := range items {
 		item.Entity.DeviceID = item.DeviceID
@@ -231,20 +309,14 @@ func batchUpdateEntities(c *gin.Context) {
 		}
 		results[i] = r
 	}
-	c.JSON(http.StatusOK, results)
+	return results
 }
 
-// batchDeleteEntities deletes multiple entities by plugin_id + device_id + entity_id.
-func batchDeleteEntities(c *gin.Context) {
-	var refs []types.BatchEntityRef
-	if err := c.ShouldBindJSON(&refs); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
+func batchDeleteEntities(refs []types.BatchEntityRef) []types.BatchResult {
 	results := make([]types.BatchResult, len(refs))
 	for i, ref := range refs {
 		r := types.BatchResult{PluginID: ref.PluginID, DeviceID: ref.DeviceID, EntityID: ref.EntityID}
-		params := gin.H{"device_id": ref.DeviceID, "entity_id": ref.EntityID}
+		params := map[string]string{"device_id": ref.DeviceID, "entity_id": ref.EntityID}
 		resp := routeRPC(ref.PluginID, "entities/delete", params)
 		if resp.Error != nil {
 			r.Error = resp.Error.Message
@@ -253,5 +325,5 @@ func batchDeleteEntities(c *gin.Context) {
 		}
 		results[i] = r
 	}
-	c.JSON(http.StatusOK, results)
+	return results
 }

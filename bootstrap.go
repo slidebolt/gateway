@@ -11,6 +11,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/danielgtaylor/huma/v2"
+	"github.com/danielgtaylor/huma/v2/adapters/humagin"
 	"github.com/gin-gonic/gin"
 	"github.com/nats-io/nats.go"
 	runner "github.com/slidebolt/sdk-runner"
@@ -56,7 +58,23 @@ func run() {
 	startDiscoveryProbe()
 
 	r := gin.Default()
-	registerRoutes(r)
+
+	config := huma.DefaultConfig("SlideBolt Gateway API", "1.0.0")
+	config.Info.Description = "REST API for managing plugins, devices, entities, scripts, commands, and events. " +
+		"Plugin-scoped routes proxy requests to the target plugin over NATS. " +
+		"Also available as an MCP server over stdio."
+
+	// Keep error responses as {"error": "message"} to match existing wire format.
+	huma.NewError = func(status int, msg string, errs ...error) huma.StatusError {
+		detail := msg
+		if len(errs) > 0 && errs[0] != nil && errs[0].Error() != "" {
+			detail = errs[0].Error()
+		}
+		return &apiError{status: status, Message: detail}
+	}
+
+	api := humagin.New(r, config)
+	registerRoutes(api)
 
 	srv := &http.Server{
 		Addr:    apiHost + ":" + apiPort,
@@ -69,9 +87,9 @@ func run() {
 		}
 	}()
 
-	// Start MCP bridge over Stdio
-	// This allows the gateway binary to be used directly by Claude/LLMs as an MCP server.
-	mcpBridge := NewMCPBridge()
+	// MCP bridge over Stdio — tools are generated directly from the OpenAPI spec,
+	// so every REST route is automatically available to AI agents.
+	mcpBridge := NewMCPBridge(api, "http://"+apiHost+":"+apiPort)
 	go mcpBridge.Serve()
 
 	quit := make(chan os.Signal, 1)

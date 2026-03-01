@@ -1,29 +1,35 @@
 package main
 
+// MCPBridge generates MCP tools automatically from the huma OpenAPI spec.
+// Every REST route is available as an MCP tool — no per-route MCP code needed.
+// When a new route is added to routes.go, it appears in MCP automatically.
+
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
+	"net/http"
+	"net/url"
+	"strings"
 
+	"github.com/danielgtaylor/huma/v2"
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
-	"github.com/slidebolt/sdk-runner"
-	"github.com/slidebolt/sdk-types"
 )
 
-// MCPBridge wraps a standard MCP server and maps it to SlideBolt's internal logic.
 type MCPBridge struct {
 	mcpServer *server.MCPServer
 }
 
-func NewMCPBridge() *MCPBridge {
-	s := server.NewMCPServer("SlideBolt Gateway", "1.1.0")
-
+func NewMCPBridge(api huma.API, baseURL string) *MCPBridge {
+	s := server.NewMCPServer("SlideBolt Gateway", "1.1.0",
+		server.WithToolCapabilities(true),
+	)
 	b := &MCPBridge{mcpServer: s}
-	b.installResources()
-	b.installTools()
-
+	b.buildFromOpenAPI(api, baseURL)
 	return b
 }
 
@@ -33,170 +39,158 @@ func (b *MCPBridge) Serve() {
 	}
 }
 
-func (b *MCPBridge) installResources() {
-	// 1. Registry Resource
-	b.mcpServer.AddResource(mcp.NewResource("slidebolt://registry", "Registry", mcp.WithResourceDescription("List of all active plugins and their manifests")),
-		func(ctx context.Context, request mcp.ReadResourceRequest) ([]mcp.ResourceContents, error) {
-			regMu.RLock()
-			defer regMu.RUnlock()
-			data, _ := json.MarshalIndent(registry, "", "  ")
-			return []mcp.ResourceContents{
-				mcp.TextResourceContents{
-					URI:      "slidebolt://registry",
-					MIMEType: "application/json",
-					Text:     string(data),
-				},
-			}, nil
-		})
+// buildFromOpenAPI walks the huma OpenAPI spec and registers one MCP tool per
+// operation. The tool handler proxies the call to the REST API over HTTP.
+func (b *MCPBridge) buildFromOpenAPI(api huma.API, baseURL string) {
+	oapi := api.OpenAPI()
+	if oapi == nil {
+		return
+	}
 
-	// 2. Runtime Resource
-	b.mcpServer.AddResource(mcp.NewResource("slidebolt://runtime", "Runtime", mcp.WithResourceDescription("Gateway runtime configuration")),
-		func(ctx context.Context, request mcp.ReadResourceRequest) ([]mcp.ResourceContents, error) {
-			data, _ := json.MarshalIndent(gatewayRT, "", "  ")
-			return []mcp.ResourceContents{
-				mcp.TextResourceContents{
-					URI:      "slidebolt://runtime",
-					MIMEType: "application/json",
-					Text:     string(data),
-				},
-			}, nil
-		})
+	type opEntry struct {
+		method string
+		op     *huma.Operation
+	}
+
+	for path, item := range oapi.Paths {
+		ops := []opEntry{
+			{"GET", item.Get},
+			{"POST", item.Post},
+			{"PUT", item.Put},
+			{"DELETE", item.Delete},
+			{"PATCH", item.Patch},
+		}
+		for _, e := range ops {
+			if e.op == nil {
+				continue
+			}
+			b.registerTool(e.method, path, e.op, baseURL)
+		}
+	}
 }
 
-func (b *MCPBridge) installTools() {
-	// --- COMMAND TOOL ---
-	b.mcpServer.AddTool(mcp.NewTool("execute_command",
-		mcp.WithDescription("Execute a command on a specific entity (e.g., turn on a light, set brightness)"),
-		mcp.WithString("plugin_id", mcp.Required(), mcp.Description("ID of the target plugin")),
-		mcp.WithString("device_id", mcp.Required(), mcp.Description("ID of the target device")),
-		mcp.WithString("entity_id", mcp.Required(), mcp.Description("ID of the target entity")),
-		mcp.WithString("action", mcp.Required(), mcp.Description("The command action to perform (e.g., set_brightness, turn_on)")),
-		mcp.WithObject("payload", mcp.Description("Optional JSON object for command parameters")),
-	), b.handleExecuteCommand)
+func (b *MCPBridge) registerTool(method, path string, op *huma.Operation, baseURL string) {
+	name := op.OperationID
+	if name == "" {
+		name = strings.ToLower(method) + "_" + pathToToolName(path)
+	}
 
-	// --- SEARCH TOOLS ---
-	b.mcpServer.AddTool(mcp.NewTool("search_devices",
-		mcp.WithDescription("Search for devices matching a name pattern"),
-		mcp.WithString("pattern", mcp.Required(), mcp.Description("Glob pattern for device ID or name")),
-	), b.handleSearchDevices)
+	desc := op.Summary
+	if op.Description != "" {
+		desc += "\n\n" + op.Description
+	}
 
-	b.mcpServer.AddTool(mcp.NewTool("search_entities",
-		mcp.WithDescription("Search for entities matching patterns"),
-		mcp.WithString("pattern", mcp.Required(), mcp.Description("Glob pattern for entity properties")),
-	), b.handleSearchEntities)
+	var opts []mcp.ToolOption
+	opts = append(opts, mcp.WithDescription(desc))
 
-	// --- BATCH TOOLS ---
-	b.mcpServer.AddTool(mcp.NewTool("batch_get_devices",
-		mcp.WithDescription("Fetch multiple devices by ID from a specific plugin"),
-		mcp.WithString("plugin_id", mcp.Required(), mcp.Description("Plugin ID")),
-	), b.handleBatchGetDevices)
+	for _, param := range op.Parameters {
+		if param.In == "path" || param.In == "query" || param.In == "header" {
+			pOpts := []mcp.PropertyOption{mcp.Description(param.Description)}
+			opts = append(opts, mcp.WithString(param.Name, pOpts...))
+		}
+	}
+
+	if op.RequestBody != nil {
+		opts = append(opts, mcp.WithObject("body",
+			mcp.Description("Request body as a JSON object"),
+		))
+	}
+
+	b.mcpServer.AddTool(
+		mcp.NewTool(name, opts...),
+		makeHTTPHandler(method, path, op, baseURL),
+	)
 }
 
-func (b *MCPBridge) handleExecuteCommand(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	args, ok := request.Params.Arguments.(map[string]any)
-	if !ok {
-		return mcp.NewToolResultError("invalid arguments"), nil
+func makeHTTPHandler(method, pathTemplate string, op *huma.Operation, baseURL string) func(context.Context, mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		args, _ := req.Params.Arguments.(map[string]any)
+		if args == nil {
+			args = map[string]any{}
+		}
+
+		// Fill path parameters.
+		urlPath := pathTemplate
+		queryParams := url.Values{}
+
+		for _, param := range op.Parameters {
+			val, ok := args[param.Name]
+			if !ok || val == nil {
+				continue
+			}
+			strVal := fmt.Sprintf("%v", val)
+			switch param.In {
+			case "path":
+				urlPath = strings.ReplaceAll(urlPath, "{"+param.Name+"}", url.PathEscape(strVal))
+			case "query":
+				queryParams.Set(param.Name, strVal)
+			case "header":
+				// headers handled below
+			}
+		}
+
+		fullURL := baseURL + urlPath
+		if len(queryParams) > 0 {
+			fullURL += "?" + queryParams.Encode()
+		}
+
+		var bodyReader io.Reader
+		if body, ok := args["body"]; ok && body != nil {
+			bodyBytes, err := marshalBody(body)
+			if err != nil {
+				return mcp.NewToolResultError("could not marshal body: " + err.Error()), nil
+			}
+			bodyReader = bytes.NewReader(bodyBytes)
+		}
+
+		httpReq, err := http.NewRequestWithContext(ctx, method, fullURL, bodyReader)
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		if bodyReader != nil {
+			httpReq.Header.Set("Content-Type", "application/json")
+		}
+
+		// Pass through header parameters.
+		for _, param := range op.Parameters {
+			if param.In != "header" {
+				continue
+			}
+			if val, ok := args[param.Name]; ok && val != nil {
+				httpReq.Header.Set(param.Name, fmt.Sprintf("%v", val))
+			}
+		}
+
+		resp, err := http.DefaultClient.Do(httpReq)
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		defer resp.Body.Close()
+
+		respBody, _ := io.ReadAll(resp.Body)
+		if resp.StatusCode >= 400 {
+			return mcp.NewToolResultError(string(respBody)), nil
+		}
+		return mcp.NewToolResultText(string(respBody)), nil
 	}
-	pID, _ := args["plugin_id"].(string)
-	dID, _ := args["device_id"].(string)
-	eID, _ := args["entity_id"].(string)
-	action, _ := args["action"].(string)
-	
-	payloadMap, ok := args["payload"].(map[string]any)
-	if !ok {
-		payloadMap = make(map[string]any)
-	}
-	payloadMap["type"] = action
-	payloadBytes, _ := json.Marshal(payloadMap)
-	
-	result, err := b.callInternalRPC(pID, "entities/commands/create", map[string]any{
-		"device_id": dID,
-		"entity_id": eID,
-		"payload":   json.RawMessage(payloadBytes),
-	})
-	
-	if err != nil {
-		return mcp.NewToolResultError(err.Error()), nil
-	}
-	
-	data, _ := json.MarshalIndent(result, "", "  ")
-	return mcp.NewToolResultText(string(data)), nil
 }
 
-func (b *MCPBridge) handleSearchDevices(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	args, ok := request.Params.Arguments.(map[string]any)
-	if !ok {
-		return mcp.NewToolResultError("invalid arguments"), nil
+func marshalBody(v any) ([]byte, error) {
+	switch b := v.(type) {
+	case []byte:
+		return b, nil
+	case string:
+		return []byte(b), nil
+	default:
+		return json.Marshal(v)
 	}
-	pattern, _ := args["pattern"].(string)
-	results := b.broadcastSearch(runner.SubjectSearchDevices, types.SearchQuery{Pattern: pattern})
-	data, _ := json.MarshalIndent(results, "", "  ")
-	return mcp.NewToolResultText(string(data)), nil
 }
 
-func (b *MCPBridge) handleSearchEntities(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	args, ok := request.Params.Arguments.(map[string]any)
-	if !ok {
-		return mcp.NewToolResultError("invalid arguments"), nil
-	}
-	pattern, _ := args["pattern"].(string)
-	results := b.broadcastSearch(runner.SubjectSearchEntities, types.SearchQuery{Pattern: pattern})
-	data, _ := json.MarshalIndent(results, "", "  ")
-	return mcp.NewToolResultText(string(data)), nil
-}
-
-func (b *MCPBridge) handleBatchGetDevices(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	args, ok := request.Params.Arguments.(map[string]any)
-	if !ok {
-		return mcp.NewToolResultError("invalid arguments"), nil
-	}
-	pID, _ := args["plugin_id"].(string)
-	
-	results, err := b.callInternalRPC(pID, "devices/list", nil)
-	if err != nil {
-		return mcp.NewToolResultError(err.Error()), nil
-	}
-	
-	data, _ := json.MarshalIndent(results, "", "  ")
-	return mcp.NewToolResultText(string(data)), nil
-}
-
-func (b *MCPBridge) callInternalRPC(pluginID, method string, params any) (any, error) {
-	regMu.RLock()
-	reg, ok := registry[pluginID]
-	regMu.RUnlock()
-	if !ok {
-		return nil, fmt.Errorf("plugin %s not found", pluginID)
-	}
-
-	paramsBytes, _ := json.Marshal(params)
-	id := json.RawMessage(`1`)
-	req := types.Request{JSONRPC: types.JSONRPCVersion, ID: &id, Method: method, Params: paramsBytes}
-	data, _ := json.Marshal(req)
-	
-	msg, err := nc.Request(reg.RPCSubject, data, 2000)
-	if err != nil {
-		return nil, err
-	}
-	
-	var resp types.Response
-	json.Unmarshal(msg.Data, &resp)
-	if resp.Error != nil {
-		return nil, fmt.Errorf(resp.Error.Message)
-	}
-	return resp.Result, nil
-}
-
-func (b *MCPBridge) broadcastSearch(subject string, query types.SearchQuery) []any {
-	data, _ := json.Marshal(query)
-	msgs, err := nc.Request(subject, data, 500)
-	if err != nil {
-		return []any{}
-	}
-	
-	var pluginResults []any
-	if err := json.Unmarshal(msgs.Data, &pluginResults); err == nil {
-		return pluginResults
-	}
-	return []any{}
+func pathToToolName(p string) string {
+	p = strings.Trim(p, "/")
+	p = strings.ReplaceAll(p, "{", "")
+	p = strings.ReplaceAll(p, "}", "")
+	p = strings.ReplaceAll(p, "/", "_")
+	p = strings.ReplaceAll(p, "-", "_")
+	return p
 }
