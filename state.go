@@ -19,6 +19,7 @@ var (
 
 type gatewayRuntimeInfo struct {
 	NATSURL string `json:"nats_url"`
+	Version string `json:"version,omitempty"`
 }
 
 type virtualEntityRecord struct {

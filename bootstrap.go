@@ -30,7 +30,7 @@ func run() {
 	dataDir := runner.MustGetEnv(runner.EnvPluginData)
 
 	vstore = loadVirtualStore(dataDir)
-	gatewayRT = gatewayRuntimeInfo{NATSURL: natsURL}
+	gatewayRT = gatewayRuntimeInfo{NATSURL: natsURL, Version: os.Getenv("APP_VERSION")}
 
 	gatewayID := strings.TrimPrefix(rpcSubject, runner.SubjectRPCPrefix)
 	if gatewayID == "" {
