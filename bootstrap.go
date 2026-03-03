@@ -75,6 +75,7 @@ func run() {
 
 	api := humagin.New(r, config)
 	registerRoutes(api)
+	r.GET("/api/topics/subscribe", sseHandler)
 
 	srv := &http.Server{
 		Addr:    apiHost + ":" + apiPort,

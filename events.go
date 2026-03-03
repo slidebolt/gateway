@@ -42,6 +42,7 @@ func subscribeEntityEvents() {
 			EventID:   env.EventID,
 			CreatedAt: time.Now().UTC(),
 		})
+		broker.broadcast(sseMessage{Type: "entity", PluginID: env.PluginID, DeviceID: env.DeviceID, EntityID: env.EntityID})
 
 		for key, rec := range vstore.entities {
 			if !rec.MirrorSource {
@@ -69,6 +70,7 @@ func subscribeEntityEvents() {
 				EventID:   rec.Entity.Data.LastEventID,
 				CreatedAt: time.Now().UTC(),
 			})
+			broker.broadcast(sseMessage{Type: "entity", PluginID: rec.OwnerPluginID, DeviceID: rec.OwnerDeviceID, EntityID: rec.Entity.ID})
 		}
 		vstore.persistLocked()
 		vstore.mu.Unlock()

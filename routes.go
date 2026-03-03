@@ -204,12 +204,12 @@ type SearchPluginsOutput struct{ Body []types.Manifest }
 
 type SearchDevicesInput struct {
 	Pattern string   `query:"q" doc:"Glob-style search pattern (default: *)"`
-	Labels  []string `query:"label" doc:"Label filters in key:value format. Multiple values use AND logic (e.g. room:kitchen)."`
+	Labels  []string `query:"label,explode" doc:"Label filters in key:value format. Multiple values use AND logic (e.g. room:kitchen)."`
 }
 type SearchDevicesOutput struct{ Body []types.Device }
 
 type SearchEntitiesInput struct {
-	Labels []string `query:"label" doc:"Label filters in key:value format. Multiple values use AND logic."`
+	Labels []string `query:"label,explode" doc:"Label filters in key:value format. Multiple values use AND logic."`
 }
 type SearchEntitiesOutput struct{ Body []types.Entity }
 
@@ -338,6 +338,7 @@ func registerDeviceRoutes(api huma.API) {
 		if resp.Error != nil {
 			return nil, pluginErr(resp.Error.Message)
 		}
+		broker.broadcast(sseMessage{Type: "device", PluginID: input.PluginID, DeviceID: input.Body.ID})
 		return &DeviceOutput{Body: resp.Result}, nil
 	})
 
@@ -935,15 +936,15 @@ func filterDescriptor(desc types.DomainDescriptor, actions []string) types.Domai
 	return filtered
 }
 
-func parseLabels(pairs []string) map[string]string {
+func parseLabels(pairs []string) map[string][]string {
 	if len(pairs) == 0 {
 		return nil
 	}
-	labels := make(map[string]string, len(pairs))
+	labels := make(map[string][]string, len(pairs))
 	for _, p := range pairs {
 		k, v, ok := strings.Cut(p, ":")
 		if ok {
-			labels[k] = v
+			labels[k] = append(labels[k], v)
 		}
 	}
 	return labels
