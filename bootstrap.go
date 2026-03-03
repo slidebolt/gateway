@@ -62,6 +62,7 @@ func run() {
 
 	subscribeRegistry()
 	subscribeEntityEvents()
+	subscribeCommandStatuses()
 	selfRegister(rpcSubject)
 	startDiscoveryProbe()
 
@@ -120,6 +121,9 @@ func subscribeRegistry() {
 	_, _ = nc.Subscribe(runner.SubjectRegistration, func(m *nats.Msg) {
 		var reg types.Registration
 		if err := json.Unmarshal(m.Data, &reg); err == nil {
+			for _, schema := range reg.Manifest.Schemas {
+				types.RegisterDomain(schema)
+			}
 			regMu.Lock()
 			registry[reg.Manifest.ID] = reg
 			regMu.Unlock()
@@ -161,6 +165,17 @@ func selfRegister(rpcSubject string) {
 	_ = nc.Publish(runner.SubjectRegistration, regData)
 	_, _ = nc.Subscribe(runner.SubjectDiscoveryProbe, func(m *nats.Msg) {
 		_ = nc.Publish(runner.SubjectRegistration, regData)
+	})
+}
+
+func subscribeCommandStatuses() {
+	_, _ = nc.Subscribe(runner.SubjectCommandStatus, func(m *nats.Msg) {
+		var status types.CommandStatus
+		if err := json.Unmarshal(m.Data, &status); err == nil && status.CommandID != "" {
+			vstore.mu.Lock()
+			vstore.commandIndex[status.CommandID] = status
+			vstore.mu.Unlock()
+		}
 	})
 }
 

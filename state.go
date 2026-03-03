@@ -50,11 +50,12 @@ type observedEvent struct {
 }
 
 type virtualStore struct {
-	mu       sync.RWMutex
-	entities map[string]virtualEntityRecord
-	commands map[string]virtualCommandRecord
-	events   []observedEvent
-	dataDir  string
+	mu           sync.RWMutex
+	entities     map[string]virtualEntityRecord
+	commands     map[string]virtualCommandRecord
+	commandIndex map[string]types.CommandStatus
+	events       []observedEvent
+	dataDir      string
 }
 
 func entityKey(pluginID, deviceID, entityID string) string {

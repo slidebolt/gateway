@@ -3,14 +3,17 @@ package main
 import (
 	"encoding/json"
 	"os"
+
+	"github.com/slidebolt/sdk-types"
 )
 
 func loadVirtualStore(dataDir string) *virtualStore {
 	vs := &virtualStore{
-		entities: make(map[string]virtualEntityRecord),
-		commands: make(map[string]virtualCommandRecord),
-		events:   make([]observedEvent, 0),
-		dataDir:  dataDir,
+		entities:     make(map[string]virtualEntityRecord),
+		commands:     make(map[string]virtualCommandRecord),
+		commandIndex: make(map[string]types.CommandStatus),
+		events:       make([]observedEvent, 0),
+		dataDir:      dataDir,
 	}
 	_ = os.MkdirAll(dataDir, 0o755)
 	if data, err := os.ReadFile(virtualFile(dataDir, "virtual_entities.json")); err == nil {

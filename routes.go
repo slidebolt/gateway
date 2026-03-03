@@ -177,6 +177,10 @@ type GetCommandStatusInput struct {
 	CommandID string `path:"command_id" doc:"Command ID returned by the send-command endpoint"`
 }
 
+type GetAnyCommandStatusInput struct {
+	CommandID string `path:"command_id" doc:"Command ID"`
+}
+
 // --- Events ---
 
 type IngestEventInput struct {
@@ -676,6 +680,23 @@ func registerCommandRoutes(api huma.API) {
 		}
 		var status types.CommandStatus
 		json.Unmarshal(resp.Result, &status)
+		return &CommandStatusOutput{Body: status}, nil
+	})
+
+	huma.Register(api, huma.Operation{
+		OperationID: "get-any-command-status",
+		Method:      http.MethodGet,
+		Path:        "/api/commands/{command_id}",
+		Summary:     "Get command status by ID",
+		Description: "Returns the status of any command by ID, regardless of which plugin owns it. Covers commands issued directly between plugins via Ctx:SendCommand.",
+		Tags:        []string{"commands"},
+	}, func(ctx context.Context, input *GetAnyCommandStatusInput) (*CommandStatusOutput, error) {
+		vstore.mu.RLock()
+		status, ok := vstore.commandIndex[input.CommandID]
+		vstore.mu.RUnlock()
+		if !ok {
+			return nil, notFoundErr("command not found")
+		}
 		return &CommandStatusOutput{Body: status}, nil
 	})
 }
