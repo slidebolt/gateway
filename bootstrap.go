@@ -24,10 +24,19 @@ func run() {
 	if apiHost == "" {
 		apiHost = "127.0.0.1"
 	}
-	apiPort := runner.MustGetEnv(runner.EnvAPIPort)
-	natsURL := runner.MustGetEnv(runner.EnvNATSURL)
+	apiPort, err := runner.RequireEnv(runner.EnvAPIPort)
+	if err != nil {
+		log.Fatal(err)
+	}
+	natsURL, err := runner.RequireEnv(runner.EnvNATSURL)
+	if err != nil {
+		log.Fatal(err)
+	}
 	rpcSubject := os.Getenv(runner.EnvPluginRPCSbj)
-	dataDir := runner.MustGetEnv(runner.EnvPluginData)
+	dataDir, err := runner.RequireEnv(runner.EnvPluginData)
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	vstore = loadVirtualStore(dataDir)
 	gatewayRT = gatewayRuntimeInfo{NATSURL: natsURL, Version: os.Getenv("APP_VERSION")}
@@ -38,7 +47,6 @@ func run() {
 	}
 	writeRuntimeDescriptor(apiHost, apiPort, natsURL, gatewayID)
 
-	var err error
 	for i := 0; i < 10; i++ {
 		nc, err = nats.Connect(natsURL)
 		if err == nil {
