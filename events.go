@@ -34,14 +34,6 @@ func subscribeEntityEvents() {
 		}
 
 		vstore.mu.Lock()
-		vstore.appendEventLocked(observedEvent{
-			Name:      classifyEventName(env.EntityType, env.Payload, false),
-			PluginID:  env.PluginID,
-			DeviceID:  env.DeviceID,
-			EntityID:  env.EntityID,
-			EventID:   env.EventID,
-			CreatedAt: time.Now().UTC(),
-		})
 		broker.broadcast(sseMessage{Type: "entity", PluginID: env.PluginID, DeviceID: env.DeviceID, EntityID: env.EntityID})
 
 		for key, rec := range vstore.entities {
@@ -62,14 +54,6 @@ func subscribeEntityEvents() {
 			rec.Entity.Data.LastEventID = nextID("vevt")
 			rec.Entity.Data.UpdatedAt = time.Now().UTC()
 			vstore.entities[key] = rec
-			vstore.appendEventLocked(observedEvent{
-				Name:      classifyEventName(env.EntityType, env.Payload, true),
-				PluginID:  rec.OwnerPluginID,
-				DeviceID:  rec.OwnerDeviceID,
-				EntityID:  rec.Entity.ID,
-				EventID:   rec.Entity.Data.LastEventID,
-				CreatedAt: time.Now().UTC(),
-			})
 			broker.broadcast(sseMessage{Type: "entity", PluginID: rec.OwnerPluginID, DeviceID: rec.OwnerDeviceID, EntityID: rec.Entity.ID})
 		}
 		vstore.persistLocked()

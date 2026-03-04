@@ -10,11 +10,13 @@ import (
 )
 
 var (
-	nc          *nats.Conn
-	registry    = make(map[string]types.Registration)
-	regMu       sync.RWMutex
-	vstore      *virtualStore
-	gatewayRT   gatewayRuntimeInfo
+	nc        *nats.Conn
+	js        nats.JetStreamContext
+	history   *historyStore
+	registry  = make(map[string]types.Registration)
+	regMu     sync.RWMutex
+	vstore    *virtualStore
+	gatewayRT gatewayRuntimeInfo
 )
 
 type gatewayRuntimeInfo struct {
@@ -50,12 +52,10 @@ type observedEvent struct {
 }
 
 type virtualStore struct {
-	mu           sync.RWMutex
-	entities     map[string]virtualEntityRecord
-	commands     map[string]virtualCommandRecord
-	commandIndex map[string]types.CommandStatus
-	events       []observedEvent
-	dataDir      string
+	mu       sync.RWMutex
+	entities map[string]virtualEntityRecord
+	commands map[string]virtualCommandRecord
+	dataDir  string
 }
 
 func entityKey(pluginID, deviceID, entityID string) string {

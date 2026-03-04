@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -39,6 +40,16 @@ func run() {
 	}
 
 	vstore = loadVirtualStore(dataDir)
+	historyPath := filepath.Join(dataDir, "history.db")
+	history, err = openHistoryStore(historyPath)
+	if err != nil {
+		log.Fatalf("Gateway: failed to open history store: %v", err)
+	}
+	defer func() {
+		if err := history.Close(); err != nil {
+			log.Printf("Gateway: history close error: %v", err)
+		}
+	}()
 	gatewayRT = gatewayRuntimeInfo{NATSURL: natsURL, Version: os.Getenv("APP_VERSION")}
 
 	gatewayID := strings.TrimPrefix(rpcSubject, runner.SubjectRPCPrefix)
@@ -60,9 +71,36 @@ func run() {
 	}
 	defer nc.Close()
 
+	js, err = nc.JetStream()
+	if err != nil {
+		log.Fatalf("Gateway: failed to initialize JetStream: %v", err)
+	}
+
+	_, err = js.AddStream(&nats.StreamConfig{
+		Name:     "EVENTS",
+		Subjects: []string{runner.SubjectEntityEvents},
+		Storage:  nats.FileStorage,
+		MaxMsgs:  5000,
+	})
+	if err != nil {
+		log.Printf("Warning: failed to add EVENTS stream: %v", err)
+	}
+
+	_, err = js.AddStream(&nats.StreamConfig{
+		Name:     "COMMANDS",
+		Subjects: []string{runner.SubjectCommandStatus},
+		Storage:  nats.FileStorage,
+		MaxMsgs:  5000,
+	})
+	if err != nil {
+		log.Printf("Warning: failed to add COMMANDS stream: %v", err)
+	}
+
+	historyCtx, stopHistory := context.WithCancel(context.Background())
+	startHistoryConsumers(historyCtx)
+
 	subscribeRegistry()
 	subscribeEntityEvents()
-	subscribeCommandStatuses()
 	selfRegister(rpcSubject)
 	startDiscoveryProbe()
 
@@ -109,6 +147,7 @@ func run() {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
+	stopHistory()
 	if err := srv.Shutdown(ctx); err != nil {
 		log.Printf("Gateway shutdown error: %v", err)
 	}
@@ -165,17 +204,6 @@ func selfRegister(rpcSubject string) {
 	_ = nc.Publish(runner.SubjectRegistration, regData)
 	_, _ = nc.Subscribe(runner.SubjectDiscoveryProbe, func(m *nats.Msg) {
 		_ = nc.Publish(runner.SubjectRegistration, regData)
-	})
-}
-
-func subscribeCommandStatuses() {
-	_, _ = nc.Subscribe(runner.SubjectCommandStatus, func(m *nats.Msg) {
-		var status types.CommandStatus
-		if err := json.Unmarshal(m.Data, &status); err == nil && status.CommandID != "" {
-			vstore.mu.Lock()
-			vstore.commandIndex[status.CommandID] = status
-			vstore.mu.Unlock()
-		}
 	})
 }
 

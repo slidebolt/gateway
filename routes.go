@@ -41,6 +41,7 @@ type HealthInput struct {
 type HealthOutput struct{ Body map[string]any }
 
 type RuntimeOutput struct{ Body gatewayRuntimeInfo }
+type HistoryStatsOutput struct{ Body historyStats }
 
 type ListPluginsOutput struct{ Body map[string]types.Registration }
 
@@ -230,8 +231,27 @@ type ListJournalEventsInput struct {
 	PluginID string `query:"plugin_id" doc:"Filter by plugin ID"`
 	DeviceID string `query:"device_id" doc:"Filter by device ID"`
 	EntityID string `query:"entity_id" doc:"Filter by entity ID"`
+	Limit    int    `query:"limit" doc:"Max number of events to return (default: 100, max: 500)"`
 }
 type ListJournalEventsOutput struct{ Body []observedEvent }
+
+type PluginRatesInput struct {
+	Window int `query:"window" doc:"Window size in seconds (default: 30)"`
+}
+type PluginRatesOutput struct{ Body []pluginRate }
+
+type DeviceRatesInput struct {
+	PluginID string `query:"plugin_id" doc:"Filter by plugin ID"`
+	Window   int    `query:"window" doc:"Window size in seconds (default: 30)"`
+}
+type DeviceRatesOutput struct{ Body []deviceRate }
+
+type EntityRatesInput struct {
+	PluginID string `query:"plugin_id" doc:"Filter by plugin ID"`
+	DeviceID string `query:"device_id" doc:"Filter by device ID"`
+	Window   int    `query:"window" doc:"Window size in seconds (default: 30)"`
+}
+type EntityRatesOutput struct{ Body []entityRate }
 
 // --- Search ---
 
@@ -311,6 +331,24 @@ func registerSystemRoutes(api huma.API) {
 		Tags:        []string{"system"},
 	}, func(ctx context.Context, input *struct{}) (*RuntimeOutput, error) {
 		return &RuntimeOutput{Body: gatewayRT}, nil
+	})
+
+	huma.Register(api, huma.Operation{
+		OperationID: "history-stats",
+		Method:      http.MethodGet,
+		Path:        "/_internal/history/stats",
+		Summary:     "History store stats",
+		Description: "Returns SQLite-backed gateway history row counts for events and command statuses.",
+		Tags:        []string{"system"},
+	}, func(ctx context.Context, input *struct{}) (*HistoryStatsOutput, error) {
+		if history == nil {
+			return nil, huma.Error500InternalServerError("History store not available")
+		}
+		stats, err := history.Stats()
+		if err != nil {
+			return nil, huma.Error500InternalServerError("Failed to read history stats")
+		}
+		return &HistoryStatsOutput{Body: stats}, nil
 	})
 
 	huma.Register(api, huma.Operation{
@@ -807,10 +845,14 @@ func registerCommandRoutes(api huma.API) {
 		Description: "Returns the status of any command by ID, regardless of which plugin owns it. Covers commands issued directly between plugins via Ctx:SendCommand.",
 		Tags:        []string{"commands"},
 	}, func(ctx context.Context, input *GetAnyCommandStatusInput) (*CommandStatusOutput, error) {
-		vstore.mu.RLock()
-		status, ok := vstore.commandIndex[input.CommandID]
-		vstore.mu.RUnlock()
-		if !ok {
+		if history == nil {
+			return nil, huma.Error500InternalServerError("History store not available")
+		}
+		status, found, err := history.LatestCommandStatus(input.CommandID)
+		if err != nil {
+			return nil, huma.Error500InternalServerError("Failed to query command history")
+		}
+		if !found {
 			return nil, notFoundErr("command not found")
 		}
 		return &CommandStatusOutput{Body: status}, nil
@@ -852,11 +894,6 @@ func registerEventRoutes(api huma.API) {
 			}
 			vrec.Entity.Data.UpdatedAt = time.Now().UTC()
 			vstore.entities[key] = vrec
-			vstore.appendEventLocked(observedEvent{
-				Name:     classifyEventName(vrec.Entity.Domain, payload, true),
-				PluginID: pluginID, DeviceID: deviceID, EntityID: entityID,
-				EventID: vrec.Entity.Data.LastEventID, CreatedAt: time.Now().UTC(),
-			})
 			vstore.persistLocked()
 			out := vrec.Entity
 			vstore.mu.Unlock()
@@ -881,22 +918,87 @@ func registerEventRoutes(api huma.API) {
 		Description: "Returns a filtered log of recent entity state-change events observed by the gateway.",
 		Tags:        []string{"events"},
 	}, func(ctx context.Context, input *ListJournalEventsInput) (*ListJournalEventsOutput, error) {
-		vstore.mu.RLock()
-		defer vstore.mu.RUnlock()
-		out := make([]observedEvent, 0)
-		for _, evt := range vstore.events {
-			if input.PluginID != "" && evt.PluginID != input.PluginID {
-				continue
-			}
-			if input.DeviceID != "" && evt.DeviceID != input.DeviceID {
-				continue
-			}
-			if input.EntityID != "" && evt.EntityID != input.EntityID {
-				continue
-			}
-			out = append(out, evt)
+		if history == nil {
+			return nil, huma.Error500InternalServerError("History store not available")
 		}
-		return &ListJournalEventsOutput{Body: out}, nil
+		limit := input.Limit
+		if limit <= 0 {
+			limit = 100
+		}
+		if limit > 500 {
+			limit = 500
+		}
+		events, err := history.ListEvents(input.PluginID, input.DeviceID, input.EntityID, limit)
+		if err != nil {
+			return nil, huma.Error500InternalServerError("Failed to query event history")
+		}
+		return &ListJournalEventsOutput{Body: events}, nil
+	})
+
+	huma.Register(api, huma.Operation{
+		OperationID: "list-plugin-rates",
+		Method:      http.MethodGet,
+		Path:        "/api/history/plugin-rates",
+		Summary:     "Per-plugin activity rates",
+		Description: "Returns per-plugin event and command rates over a recent time window.",
+		Tags:        []string{"events"},
+	}, func(ctx context.Context, input *PluginRatesInput) (*PluginRatesOutput, error) {
+		if history == nil {
+			return nil, huma.Error500InternalServerError("History store not available")
+		}
+		window := input.Window
+		if window <= 0 {
+			window = 30
+		}
+		rates, err := history.PluginRates(window)
+		if err != nil {
+			return nil, huma.Error500InternalServerError("Failed to query plugin rates")
+		}
+		return &PluginRatesOutput{Body: rates}, nil
+	})
+
+	huma.Register(api, huma.Operation{
+		OperationID: "list-device-rates",
+		Method:      http.MethodGet,
+		Path:        "/api/history/device-rates",
+		Summary:     "Per-device activity rates",
+		Description: "Returns per-device event and command rates over a recent time window.",
+		Tags:        []string{"events"},
+	}, func(ctx context.Context, input *DeviceRatesInput) (*DeviceRatesOutput, error) {
+		if history == nil {
+			return nil, huma.Error500InternalServerError("History store not available")
+		}
+		window := input.Window
+		if window <= 0 {
+			window = 30
+		}
+		rates, err := history.DeviceRates(input.PluginID, window)
+		if err != nil {
+			return nil, huma.Error500InternalServerError("Failed to query device rates")
+		}
+		return &DeviceRatesOutput{Body: rates}, nil
+	})
+
+	huma.Register(api, huma.Operation{
+		OperationID: "list-entity-rates",
+		Method:      http.MethodGet,
+		Path:        "/api/history/entity-rates",
+		Summary:     "Per-entity activity rates",
+		Description: "Returns per-entity event and command rates over a recent time window.",
+		Tags:        []string{"events"},
+	}, func(ctx context.Context, input *EntityRatesInput) (*EntityRatesOutput, error) {
+		if history == nil {
+			return nil, huma.Error500InternalServerError("History store not available")
+		}
+		window := input.Window
+		if window <= 0 {
+			window = 30
+		}
+		rates, err := history.EntityRates(input.PluginID, input.DeviceID, window)
+		if err != nil {
+			return nil, huma.Error500InternalServerError("Failed to query entity rates")
+		}
+		return &EntityRatesOutput{Body: rates}, nil
 	})
 }
 

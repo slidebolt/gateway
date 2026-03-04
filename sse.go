@@ -11,10 +11,17 @@ import (
 )
 
 type sseMessage struct {
-	Type     string `json:"type"`
-	PluginID string `json:"plugin_id,omitempty"`
-	DeviceID string `json:"device_id,omitempty"`
-	EntityID string `json:"entity_id,omitempty"`
+	Type      string `json:"type"`
+	Kind      string `json:"kind,omitempty"`
+	PluginID  string `json:"plugin_id,omitempty"`
+	DeviceID  string `json:"device_id,omitempty"`
+	EntityID  string `json:"entity_id,omitempty"`
+	Name      string `json:"name,omitempty"`
+	State     string `json:"state,omitempty"`
+	EventID   string `json:"event_id,omitempty"`
+	CommandID string `json:"command_id,omitempty"`
+	CreatedAt string `json:"created_at,omitempty"`
+	Seq       uint64 `json:"seq,omitempty"`
 }
 
 type sseBroker struct {
