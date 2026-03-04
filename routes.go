@@ -24,10 +24,10 @@ type apiError struct {
 func (e *apiError) Error() string  { return e.Message }
 func (e *apiError) GetStatus() int { return e.status }
 
-func pluginErr(msg string) error       { return &apiError{status: http.StatusForbidden, Message: msg} }
-func badReqErr(msg string) error       { return &apiError{status: http.StatusBadRequest, Message: msg} }
-func notFoundErr(msg string) error     { return &apiError{status: http.StatusNotFound, Message: msg} }
-func conflictErr(msg string) error     { return &apiError{status: http.StatusConflict, Message: msg} }
+func pluginErr(msg string) error   { return &apiError{status: http.StatusForbidden, Message: msg} }
+func badReqErr(msg string) error   { return &apiError{status: http.StatusBadRequest, Message: msg} }
+func notFoundErr(msg string) error { return &apiError{status: http.StatusNotFound, Message: msg} }
+func conflictErr(msg string) error { return &apiError{status: http.StatusConflict, Message: msg} }
 
 // ---------------------------------------------------------------------------
 // Input / output types — one per route, named clearly for OpenAPI schema gen.
@@ -62,6 +62,22 @@ type UpdateDeviceInput struct {
 	Body     types.Device
 }
 
+type PatchDeviceNameInput struct {
+	PluginID string `path:"plugin_id" doc:"Plugin ID"`
+	DeviceID string `path:"device_id" doc:"Device ID"`
+	Body     struct {
+		LocalName string `json:"local_name" doc:"New user-facing name"`
+	}
+}
+
+type PatchDeviceLabelsInput struct {
+	PluginID string `path:"plugin_id" doc:"Plugin ID"`
+	DeviceID string `path:"device_id" doc:"Device ID"`
+	Body     struct {
+		Labels map[string][]string `json:"labels" doc:"Full labels map (string -> string[])"`
+	}
+}
+
 type DeleteDeviceInput struct {
 	PluginID string `path:"plugin_id" doc:"Plugin ID"`
 	DeviceID string `path:"device_id" doc:"Device ID"`
@@ -92,6 +108,24 @@ type UpdateEntityInput struct {
 	PluginID string `path:"plugin_id" doc:"Plugin ID"`
 	DeviceID string `path:"device_id" doc:"Device ID"`
 	Body     types.Entity
+}
+
+type PatchEntityNameInput struct {
+	PluginID string `path:"plugin_id" doc:"Plugin ID"`
+	DeviceID string `path:"device_id" doc:"Device ID"`
+	EntityID string `path:"entity_id" doc:"Entity ID"`
+	Body     struct {
+		LocalName string `json:"local_name" doc:"New user-facing name"`
+	}
+}
+
+type PatchEntityLabelsInput struct {
+	PluginID string `path:"plugin_id" doc:"Plugin ID"`
+	DeviceID string `path:"device_id" doc:"Device ID"`
+	EntityID string `path:"entity_id" doc:"Entity ID"`
+	Body     struct {
+		Labels map[string][]string `json:"labels" doc:"Full labels map (string -> string[])"`
+	}
 }
 
 type DeleteEntityInput struct {
@@ -347,6 +381,47 @@ func registerDeviceRoutes(api huma.API) {
 	})
 
 	huma.Register(api, huma.Operation{
+		OperationID: "patch-device-name",
+		Method:      http.MethodPatch,
+		Path:        "/api/plugins/{plugin_id}/devices/{device_id}/name",
+		Summary:     "Patch device name",
+		Description: "Updates only device.local_name.",
+		Tags:        []string{"devices"},
+	}, func(ctx context.Context, input *PatchDeviceNameInput) (*DeviceOutput, error) {
+		name := strings.TrimSpace(input.Body.LocalName)
+		if name == "" {
+			return nil, badReqErr("local_name is required")
+		}
+		payload := types.Device{ID: input.DeviceID, LocalName: name}
+		resp := routeRPC(input.PluginID, "devices/update", payload)
+		if resp.Error != nil {
+			return nil, pluginErr(resp.Error.Message)
+		}
+		broker.broadcast(sseMessage{Type: "device", PluginID: input.PluginID, DeviceID: input.DeviceID})
+		return &DeviceOutput{Body: resp.Result}, nil
+	})
+
+	huma.Register(api, huma.Operation{
+		OperationID: "patch-device-labels",
+		Method:      http.MethodPatch,
+		Path:        "/api/plugins/{plugin_id}/devices/{device_id}/labels",
+		Summary:     "Patch device labels",
+		Description: "Updates only device.labels. Provide map[string][]string.",
+		Tags:        []string{"devices"},
+	}, func(ctx context.Context, input *PatchDeviceLabelsInput) (*DeviceOutput, error) {
+		if len(input.Body.Labels) == 0 {
+			return nil, badReqErr("labels is required")
+		}
+		payload := types.Device{ID: input.DeviceID, Labels: input.Body.Labels}
+		resp := routeRPC(input.PluginID, "devices/update", payload)
+		if resp.Error != nil {
+			return nil, pluginErr(resp.Error.Message)
+		}
+		broker.broadcast(sseMessage{Type: "device", PluginID: input.PluginID, DeviceID: input.DeviceID})
+		return &DeviceOutput{Body: resp.Result}, nil
+	})
+
+	huma.Register(api, huma.Operation{
 		OperationID: "delete-device",
 		Method:      http.MethodDelete,
 		Path:        "/api/plugins/{plugin_id}/devices/{device_id}",
@@ -415,6 +490,47 @@ func registerEntityRoutes(api huma.API) {
 		if resp.Error != nil {
 			return nil, pluginErr(resp.Error.Message)
 		}
+		return &EntityOutput{Body: resp.Result}, nil
+	})
+
+	huma.Register(api, huma.Operation{
+		OperationID: "patch-entity-name",
+		Method:      http.MethodPatch,
+		Path:        "/api/plugins/{plugin_id}/devices/{device_id}/entities/{entity_id}/name",
+		Summary:     "Patch entity name",
+		Description: "Updates only entity.local_name.",
+		Tags:        []string{"entities"},
+	}, func(ctx context.Context, input *PatchEntityNameInput) (*EntityOutput, error) {
+		name := strings.TrimSpace(input.Body.LocalName)
+		if name == "" {
+			return nil, badReqErr("local_name is required")
+		}
+		payload := types.Entity{ID: input.EntityID, DeviceID: input.DeviceID, LocalName: name}
+		resp := routeRPC(input.PluginID, "entities/update", payload)
+		if resp.Error != nil {
+			return nil, pluginErr(resp.Error.Message)
+		}
+		broker.broadcast(sseMessage{Type: "entity", PluginID: input.PluginID, DeviceID: input.DeviceID, EntityID: input.EntityID})
+		return &EntityOutput{Body: resp.Result}, nil
+	})
+
+	huma.Register(api, huma.Operation{
+		OperationID: "patch-entity-labels",
+		Method:      http.MethodPatch,
+		Path:        "/api/plugins/{plugin_id}/devices/{device_id}/entities/{entity_id}/labels",
+		Summary:     "Patch entity labels",
+		Description: "Updates only entity.labels. Provide map[string][]string.",
+		Tags:        []string{"entities"},
+	}, func(ctx context.Context, input *PatchEntityLabelsInput) (*EntityOutput, error) {
+		if len(input.Body.Labels) == 0 {
+			return nil, badReqErr("labels is required")
+		}
+		payload := types.Entity{ID: input.EntityID, DeviceID: input.DeviceID, Labels: input.Body.Labels}
+		resp := routeRPC(input.PluginID, "entities/update", payload)
+		if resp.Error != nil {
+			return nil, pluginErr(resp.Error.Message)
+		}
+		broker.broadcast(sseMessage{Type: "entity", PluginID: input.PluginID, DeviceID: input.DeviceID, EntityID: input.EntityID})
 		return &EntityOutput{Body: resp.Result}, nil
 	})
 
@@ -737,7 +853,7 @@ func registerEventRoutes(api huma.API) {
 			vrec.Entity.Data.UpdatedAt = time.Now().UTC()
 			vstore.entities[key] = vrec
 			vstore.appendEventLocked(observedEvent{
-				Name: classifyEventName(vrec.Entity.Domain, payload, true),
+				Name:     classifyEventName(vrec.Entity.Domain, payload, true),
 				PluginID: pluginID, DeviceID: deviceID, EntityID: entityID,
 				EventID: vrec.Entity.Data.LastEventID, CreatedAt: time.Now().UTC(),
 			})
