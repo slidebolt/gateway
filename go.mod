@@ -7,9 +7,9 @@ require (
 	github.com/gin-gonic/gin v1.11.0
 	github.com/mark3labs/mcp-go v0.44.1
 	github.com/nats-io/nats.go v1.49.0
-	github.com/slidebolt/sdk-entities v1.1.0
-	github.com/slidebolt/sdk-runner v1.5.0
-	github.com/slidebolt/sdk-types v1.5.0
+	github.com/slidebolt/sdk-entities v1.4.1
+	github.com/slidebolt/sdk-runner v1.6.1
+	github.com/slidebolt/sdk-types v1.5.3
 	github.com/swaggo/swag v1.16.6
 )
 
