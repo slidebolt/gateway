@@ -113,8 +113,8 @@ github.com/slidebolt/sdk-entities v1.4.1 h1:P8OsdQG73pncNQlFsZz+MkhNl3oApS6N+A4T
 github.com/slidebolt/sdk-entities v1.4.1/go.mod h1:EWKsvV6nEkUMn+W/5yfoYDuUmjRhgxznrI1VQArGavs=
 github.com/slidebolt/sdk-runner v1.6.1 h1:G29acDZF2ksRr43dAADBAYik33/LZBVXG43DBQM/1DU=
 github.com/slidebolt/sdk-runner v1.6.1/go.mod h1:/7mW6J7aetaw/jJQfWH4WGBI0ve8/QR8yMvvlgDCwNU=
-github.com/slidebolt/sdk-types v1.5.3 h1:JKfPx/ga5fIdvZWYgQ4dHvFrOv4/KMt+88wSJaGGDNk=
-github.com/slidebolt/sdk-types v1.5.3/go.mod h1:/hqN6E9IAc5mm4Nx4DGfIidoKgELdPHfr30uSdNRgTM=
+github.com/slidebolt/sdk-types v1.5.4 h1:e6ddLoOCcKp49j6kjxDOPOSy8OvPayrBpYSbemhjcB4=
+github.com/slidebolt/sdk-types v1.5.4/go.mod h1:/hqN6E9IAc5mm4Nx4DGfIidoKgELdPHfr30uSdNRgTM=
 github.com/spf13/cast v1.7.1 h1:cuNEagBQEHWN1FnbGEjCXL2szYEXqfJPbP2HNUaca9Y=
 github.com/spf13/cast v1.7.1/go.mod h1:ancEpBxwJDODSW/UG4rDrAqiKolqNNh2DX3mk86cAdo=
 github.com/stretchr/objx v0.1.0/go.mod h1:HFkY916IF+rwdDfMAkV7OtwuqBVzrE8GR6GFx+wExME=
