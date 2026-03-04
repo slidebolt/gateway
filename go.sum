@@ -109,8 +109,8 @@ github.com/quic-go/quic-go v0.59.0 h1:OLJkp1Mlm/aS7dpKgTc6cnpynnD2Xg7C1pwL6vy/SA
 github.com/quic-go/quic-go v0.59.0/go.mod h1:upnsH4Ju1YkqpLXC305eW3yDZ4NfnNbmQRCMWS58IKU=
 github.com/rogpeppe/go-internal v1.14.1 h1:UQB4HGPB6osV0SQTLymcB4TgvyWu6ZyliaW0tI/otEQ=
 github.com/rogpeppe/go-internal v1.14.1/go.mod h1:MaRKkUm5W0goXpeCfT7UZI6fk/L7L7so1lCWt35ZSgc=
-github.com/slidebolt/sdk-entities v1.4.1 h1:P8OsdQG73pncNQlFsZz+MkhNl3oApS6N+A4TmM32Cuo=
-github.com/slidebolt/sdk-entities v1.4.1/go.mod h1:EWKsvV6nEkUMn+W/5yfoYDuUmjRhgxznrI1VQArGavs=
+github.com/slidebolt/sdk-entities v1.4.2 h1:6qnm4Kn+Kx/X9X0qOVIeFezMDVyHjAI7Q818j0FspE8=
+github.com/slidebolt/sdk-entities v1.4.2/go.mod h1:EWKsvV6nEkUMn+W/5yfoYDuUmjRhgxznrI1VQArGavs=
 github.com/slidebolt/sdk-runner v1.6.1 h1:G29acDZF2ksRr43dAADBAYik33/LZBVXG43DBQM/1DU=
 github.com/slidebolt/sdk-runner v1.6.1/go.mod h1:/7mW6J7aetaw/jJQfWH4WGBI0ve8/QR8yMvvlgDCwNU=
 github.com/slidebolt/sdk-types v1.5.4 h1:e6ddLoOCcKp49j6kjxDOPOSy8OvPayrBpYSbemhjcB4=
