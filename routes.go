@@ -3,7 +3,9 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -52,6 +54,10 @@ type ListDevicesInput struct {
 }
 type ListDevicesOutput struct{ Body []types.Device }
 
+type RefreshDevicesInput struct {
+	PluginID string `path:"plugin_id" doc:"Plugin ID"`
+}
+
 type CreateDeviceInput struct {
 	PluginID string `path:"plugin_id" doc:"Plugin ID"`
 	Body     types.Device
@@ -97,6 +103,11 @@ type ListEntitiesInput struct {
 	DeviceID string `path:"device_id" doc:"Device ID"`
 }
 type ListEntitiesOutput struct{ Body []entityWithSchema }
+
+type RefreshEntitiesInput struct {
+	PluginID string `path:"plugin_id" doc:"Plugin ID"`
+	DeviceID string `path:"device_id" doc:"Device ID"`
+}
 
 type CreateEntityInput struct {
 	PluginID string `path:"plugin_id" doc:"Plugin ID"`
@@ -267,7 +278,8 @@ type SearchDevicesInput struct {
 type SearchDevicesOutput struct{ Body []types.Device }
 
 type SearchEntitiesInput struct {
-	Labels []string `query:"label,explode" doc:"Label filters in key:value format. Multiple values use AND logic."`
+	Pattern string   `query:"q" doc:"Glob-style search pattern or text to search for (default: *)"`
+	Labels  []string `query:"label,explode" doc:"Label filters in key:value format. Multiple values use AND logic."`
 }
 type SearchEntitiesOutput struct{ Body []types.Entity }
 
@@ -308,12 +320,12 @@ func registerSystemRoutes(api huma.API) {
 			return &HealthOutput{Body: map[string]any{"status": "ok"}}, nil
 		}
 		regMu.RLock()
-		reg, ok := registry[input.PluginID]
+		record, ok := registry[input.PluginID]
 		regMu.RUnlock()
 		if !ok {
 			return nil, pluginErr("plugin not found")
 		}
-		resp := routeRPC(reg.Manifest.ID, runner.HealthEndpoint, nil)
+		resp := routeRPC(record.Registration.Manifest.ID, runner.HealthEndpoint, nil)
 		if resp.Error != nil {
 			return nil, &apiError{status: http.StatusServiceUnavailable, Message: resp.Error.Message}
 		}
@@ -363,7 +375,7 @@ func registerSystemRoutes(api huma.API) {
 		defer regMu.RUnlock()
 		out := make(map[string]types.Registration, len(registry))
 		for k, v := range registry {
-			out[k] = v
+			out[k] = v.Registration
 		}
 		return &ListPluginsOutput{Body: out}, nil
 	})
@@ -379,6 +391,23 @@ func registerDeviceRoutes(api huma.API) {
 		Tags:        []string{"devices"},
 	}, func(ctx context.Context, input *ListDevicesInput) (*ListDevicesOutput, error) {
 		resp := routeRPC(input.PluginID, "devices/list", nil)
+		if resp.Error != nil {
+			return nil, pluginErr(resp.Error.Message)
+		}
+		var devices []types.Device
+		json.Unmarshal(resp.Result, &devices)
+		return &ListDevicesOutput{Body: devices}, nil
+	})
+
+	huma.Register(api, huma.Operation{
+		OperationID: "refresh-devices",
+		Method:      http.MethodPost,
+		Path:        "/api/plugins/{plugin_id}/refresh",
+		Summary:     "Refresh plugin discovery",
+		Description: "Re-runs discovery for all devices and entities managed by the plugin.",
+		Tags:        []string{"devices"},
+	}, func(ctx context.Context, input *RefreshDevicesInput) (*ListDevicesOutput, error) {
+		resp := routeRPC(input.PluginID, "devices/refresh", nil)
 		if resp.Error != nil {
 			return nil, pluginErr(resp.Error.Message)
 		}
@@ -496,6 +525,22 @@ func registerEntityRoutes(api huma.API) {
 			}
 		}
 		vstore.mu.RUnlock()
+		return &ListEntitiesOutput{Body: withSchema(entities)}, nil
+	})
+
+	huma.Register(api, huma.Operation{
+		OperationID: "refresh-entities",
+		Method:      http.MethodPost,
+		Path:        "/api/plugins/{plugin_id}/devices/{device_id}/refresh",
+		Summary:     "Refresh device entities",
+		Description: "Re-runs discovery for entities of a specific device.",
+		Tags:        []string{"entities"},
+	}, func(ctx context.Context, input *RefreshEntitiesInput) (*ListEntitiesOutput, error) {
+		resp := routeRPC(input.PluginID, "entities/refresh", map[string]string{"device_id": input.DeviceID})
+		entities, err := parseEntities(resp)
+		if err != nil {
+			return nil, pluginErr(err.Error())
+		}
 		return &ListEntitiesOutput{Body: withSchema(entities)}, nil
 	})
 
@@ -1008,7 +1053,7 @@ func registerSearchRoutes(api huma.API) {
 		Method:      http.MethodGet,
 		Path:        "/api/search/plugins",
 		Summary:     "Search plugins",
-		Description: "Broadcasts a search over NATS and collects plugin manifests from all responding plugins (500ms window).",
+		Description: "Broadcasts a search over NATS and collects plugin manifests from all responding plugins.",
 		Tags:        []string{"search"},
 	}, func(ctx context.Context, input *SearchPluginsInput) (*SearchPluginsOutput, error) {
 		pattern := input.Pattern
@@ -1018,18 +1063,54 @@ func registerSearchRoutes(api huma.API) {
 		query := types.SearchQuery{Pattern: pattern}
 		data, _ := json.Marshal(query)
 		results := make([]types.Manifest, 0)
+
+		regMu.RLock()
+		expected := make(map[string]bool)
+		for id, rec := range registry {
+			if rec.Valid {
+				expected[id] = true
+			}
+		}
+		regMu.RUnlock()
+
 		sub, _ := nc.SubscribeSync(nats.NewInbox())
 		nc.PublishRequest(runner.SubjectSearchPlugins, sub.Subject, data)
-		start := time.Now()
-		for time.Since(start) < 500*time.Millisecond {
-			msg, err := sub.NextMsg(100 * time.Millisecond)
-			if err != nil {
-				break
+
+		timeout := time.After(2 * time.Second)
+	gatherLoop:
+		for len(expected) > 0 {
+			select {
+			case <-timeout:
+				break gatherLoop
+			default:
+				msg, err := sub.NextMsg(100 * time.Millisecond)
+				if err != nil {
+					if errors.Is(err, nats.ErrTimeout) {
+						continue
+					}
+					break gatherLoop
+				}
+				var res types.SearchPluginsResponse
+				if err := json.Unmarshal(msg.Data, &res); err == nil {
+					results = append(results, res.Matches...)
+					delete(expected, res.PluginID)
+				}
 			}
-			var m types.Manifest
-			json.Unmarshal(msg.Data, &m)
-			results = append(results, m)
 		}
+		_ = sub.Unsubscribe()
+
+		if len(expected) > 0 {
+			regMu.Lock()
+			for id := range expected {
+				if rec, ok := registry[id]; ok {
+					rec.Valid = false
+					registry[id] = rec
+					log.Printf("gateway: plugin %s marked invalid (no search response)", id)
+				}
+			}
+			regMu.Unlock()
+		}
+
 		return &SearchPluginsOutput{Body: results}, nil
 	})
 
@@ -1038,15 +1119,13 @@ func registerSearchRoutes(api huma.API) {
 		Method:      http.MethodGet,
 		Path:        "/api/search/devices",
 		Summary:     "Search devices",
-		Description: "Broadcasts a device search over NATS and collects results from all plugins (500ms window).",
+		Description: "Broadcasts a device search over NATS and collects results from all plugins.",
 		Tags:        []string{"search"},
 	}, func(ctx context.Context, input *SearchDevicesInput) (*SearchDevicesOutput, error) {
 		pattern := input.Pattern
 		if pattern == "" {
 			pattern = "*"
 		}
-		// Huma input.Labels might not capture all repeated parameters in all configurations.
-		// Pulling directly from the context via the underlying Gin request to be sure.
 		var rawLabels []string
 		if iface, ok := ctx.(interface{ Gin() *gin.Context }); ok {
 			rawLabels = iface.Gin().QueryArray("label")
@@ -1058,18 +1137,54 @@ func registerSearchRoutes(api huma.API) {
 		query := types.SearchQuery{Pattern: pattern, Labels: parseLabels(rawLabels)}
 		data, _ := json.Marshal(query)
 		results := make([]types.Device, 0)
+
+		regMu.RLock()
+		expected := make(map[string]bool)
+		for id, rec := range registry {
+			if rec.Valid {
+				expected[id] = true
+			}
+		}
+		regMu.RUnlock()
+
 		sub, _ := nc.SubscribeSync(nats.NewInbox())
 		nc.PublishRequest(runner.SubjectSearchDevices, sub.Subject, data)
-		start := time.Now()
-		for time.Since(start) < 500*time.Millisecond {
-			msg, err := sub.NextMsg(100 * time.Millisecond)
-			if err != nil {
-				break
+
+		timeout := time.After(2 * time.Second)
+	gatherLoop:
+		for len(expected) > 0 {
+			select {
+			case <-timeout:
+				break gatherLoop
+			default:
+				msg, err := sub.NextMsg(100 * time.Millisecond)
+				if err != nil {
+					if errors.Is(err, nats.ErrTimeout) {
+						continue
+					}
+					break gatherLoop
+				}
+				var res types.SearchDevicesResponse
+				if err := json.Unmarshal(msg.Data, &res); err == nil {
+					results = append(results, res.Matches...)
+					delete(expected, res.PluginID)
+				}
 			}
-			var d []types.Device
-			json.Unmarshal(msg.Data, &d)
-			results = append(results, d...)
 		}
+		_ = sub.Unsubscribe()
+
+		if len(expected) > 0 {
+			regMu.Lock()
+			for id := range expected {
+				if rec, ok := registry[id]; ok {
+					rec.Valid = false
+					registry[id] = rec
+					log.Printf("gateway: plugin %s marked invalid (no device search response)", id)
+				}
+			}
+			regMu.Unlock()
+		}
+
 		return &SearchDevicesOutput{Body: results}, nil
 	})
 
@@ -1078,9 +1193,13 @@ func registerSearchRoutes(api huma.API) {
 		Method:      http.MethodGet,
 		Path:        "/api/search/entities",
 		Summary:     "Search entities",
-		Description: "Broadcasts an entity search over NATS and collects results from all plugins (500ms window).",
+		Description: "Broadcasts an entity search over NATS and collects results from all plugins.",
 		Tags:        []string{"search"},
 	}, func(ctx context.Context, input *SearchEntitiesInput) (*SearchEntitiesOutput, error) {
+		pattern := input.Pattern
+		if pattern == "" {
+			pattern = "*"
+		}
 		var rawLabels []string
 		if iface, ok := ctx.(interface{ Gin() *gin.Context }); ok {
 			rawLabels = iface.Gin().QueryArray("label")
@@ -1089,21 +1208,57 @@ func registerSearchRoutes(api huma.API) {
 			rawLabels = input.Labels
 		}
 
-		query := types.SearchQuery{Pattern: "*", Labels: parseLabels(rawLabels)}
+		query := types.SearchQuery{Pattern: pattern, Labels: parseLabels(rawLabels)}
 		data, _ := json.Marshal(query)
 		results := make([]types.Entity, 0)
+
+		regMu.RLock()
+		expected := make(map[string]bool)
+		for id, rec := range registry {
+			if rec.Valid {
+				expected[id] = true
+			}
+		}
+		regMu.RUnlock()
+
 		sub, _ := nc.SubscribeSync(nats.NewInbox())
 		nc.PublishRequest(runner.SubjectSearchEntities, sub.Subject, data)
-		start := time.Now()
-		for time.Since(start) < 500*time.Millisecond {
-			msg, err := sub.NextMsg(100 * time.Millisecond)
-			if err != nil {
-				break
+
+		timeout := time.After(2 * time.Second)
+	gatherLoop:
+		for len(expected) > 0 {
+			select {
+			case <-timeout:
+				break gatherLoop
+			default:
+				msg, err := sub.NextMsg(100 * time.Millisecond)
+				if err != nil {
+					if errors.Is(err, nats.ErrTimeout) {
+						continue
+					}
+					break gatherLoop
+				}
+				var res types.SearchEntitiesResponse
+				if err := json.Unmarshal(msg.Data, &res); err == nil {
+					results = append(results, res.Matches...)
+					delete(expected, res.PluginID)
+				}
 			}
-			var e []types.Entity
-			json.Unmarshal(msg.Data, &e)
-			results = append(results, e...)
 		}
+		_ = sub.Unsubscribe()
+
+		if len(expected) > 0 {
+			regMu.Lock()
+			for id := range expected {
+				if rec, ok := registry[id]; ok {
+					rec.Valid = false
+					registry[id] = rec
+					log.Printf("gateway: plugin %s marked invalid (no entity search response)", id)
+				}
+			}
+			regMu.Unlock()
+		}
+
 		return &SearchEntitiesOutput{Body: results}, nil
 	})
 }

@@ -12,11 +12,12 @@ import (
 
 func routeRPC(pluginID, method string, params any) types.Response {
 	regMu.RLock()
-	reg, exists := registry[pluginID]
+	record, exists := registry[pluginID]
 	regMu.RUnlock()
 	if !exists {
 		return types.Response{JSONRPC: types.JSONRPCVersion, Error: &types.RPCError{Code: -32000, Message: "plugin not registered"}}
 	}
+	reg := record.Registration
 	paramsBytes, _ := json.Marshal(params)
 	id := json.RawMessage(`1`)
 	req := types.Request{JSONRPC: types.JSONRPCVersion, ID: &id, Method: method, Params: paramsBytes}

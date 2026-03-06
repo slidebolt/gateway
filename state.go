@@ -9,11 +9,16 @@ import (
 	"github.com/slidebolt/sdk-types"
 )
 
+type pluginRecord struct {
+	Registration types.Registration
+	Valid        bool
+}
+
 var (
 	nc        *nats.Conn
 	js        nats.JetStreamContext
 	history   *historyStore
-	registry  = make(map[string]types.Registration)
+	registry  = make(map[string]pluginRecord)
 	regMu     sync.RWMutex
 	vstore    *virtualStore
 	gatewayRT gatewayRuntimeInfo

@@ -164,7 +164,10 @@ func subscribeRegistry() {
 				types.RegisterDomain(schema)
 			}
 			regMu.Lock()
-			registry[reg.Manifest.ID] = reg
+			registry[reg.Manifest.ID] = pluginRecord{
+				Registration: reg,
+				Valid:        true,
+			}
 			regMu.Unlock()
 		}
 	})
@@ -199,6 +202,33 @@ func selfRegister(rpcSubject string) {
 		}
 		data, _ := json.Marshal(resp)
 		m.Respond(data)
+	})
+
+	_, _ = nc.Subscribe(runner.SubjectSearchPlugins, func(m *nats.Msg) {
+		res := types.SearchPluginsResponse{
+			PluginID: gatewayID,
+			Matches:  []types.Manifest{manifest},
+		}
+		data, _ := json.Marshal(res)
+		_ = m.Respond(data)
+	})
+
+	_, _ = nc.Subscribe(runner.SubjectSearchDevices, func(m *nats.Msg) {
+		res := types.SearchDevicesResponse{
+			PluginID: gatewayID,
+			Matches:  []types.Device{},
+		}
+		data, _ := json.Marshal(res)
+		_ = m.Respond(data)
+	})
+
+	_, _ = nc.Subscribe(runner.SubjectSearchEntities, func(m *nats.Msg) {
+		res := types.SearchEntitiesResponse{
+			PluginID: gatewayID,
+			Matches:  []types.Entity{},
+		}
+		data, _ := json.Marshal(res)
+		_ = m.Respond(data)
 	})
 
 	_ = nc.Publish(runner.SubjectRegistration, regData)
