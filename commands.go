@@ -43,9 +43,9 @@ func monitorVirtualCommand(commandID string) {
 					vent.Entity.Data.Reported = src.Data.Reported
 					vent.Entity.Data.Effective = src.Data.Effective
 				}
-				vent.Entity.Data.SyncStatus = "in_sync"
+				vent.Entity.Data.SyncStatus = types.SyncStatusSynced
 			} else {
-				vent.Entity.Data.SyncStatus = "failed"
+				vent.Entity.Data.SyncStatus = types.SyncStatusFailed
 			}
 			vent.Entity.Data.LastCommandID = commandID
 			vent.Entity.Data.UpdatedAt = time.Now().UTC()
@@ -63,7 +63,7 @@ func monitorVirtualCommand(commandID string) {
 		rec.Status.LastUpdatedAt = time.Now().UTC()
 		vstore.commands[commandID] = rec
 		if vent, vok := vstore.entities[rec.VirtualKey]; vok {
-			vent.Entity.Data.SyncStatus = "failed"
+			vent.Entity.Data.SyncStatus = types.SyncStatusFailed
 			vent.Entity.Data.LastCommandID = commandID
 			vent.Entity.Data.UpdatedAt = time.Now().UTC()
 			vstore.entities[rec.VirtualKey] = vent

@@ -50,7 +50,7 @@ func subscribeEntityEvents() {
 			rec.Entity.Data.Desired = src.Data.Desired
 			rec.Entity.Data.Reported = src.Data.Reported
 			rec.Entity.Data.Effective = src.Data.Effective
-			rec.Entity.Data.SyncStatus = "in_sync"
+			rec.Entity.Data.SyncStatus = types.SyncStatusSynced
 			rec.Entity.Data.LastEventID = nextID("vevt")
 			rec.Entity.Data.UpdatedAt = time.Now().UTC()
 			vstore.entities[key] = rec

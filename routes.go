@@ -90,6 +90,11 @@ type DeleteDeviceInput struct {
 	DeviceID string `path:"device_id" doc:"Device ID"`
 }
 type DeleteOutput struct{ Body json.RawMessage }
+type GetDeviceInput struct {
+	PluginID string `path:"plugin_id" doc:"Plugin ID"`
+	DeviceID string `path:"device_id" doc:"Device ID"`
+}
+type GetDeviceOutput struct{ Body types.Device }
 
 // --- Entities ---
 
@@ -145,6 +150,12 @@ type DeleteEntityInput struct {
 	DeviceID string `path:"device_id" doc:"Device ID"`
 	EntityID string `path:"entity_id" doc:"Entity ID"`
 }
+type GetEntityInput struct {
+	PluginID string `path:"plugin_id" doc:"Plugin ID"`
+	DeviceID string `path:"device_id" doc:"Device ID"`
+	EntityID string `path:"entity_id" doc:"Entity ID"`
+}
+type GetEntityOutput struct{ Body entityWithSchema }
 
 type CreateVirtualEntityInput struct {
 	PluginID string `path:"plugin_id" doc:"Plugin ID that will own the virtual entity"`
@@ -502,6 +513,30 @@ func registerDeviceRoutes(api huma.API) {
 		}
 		return &DeleteOutput{Body: resp.Result}, nil
 	})
+
+	huma.Register(api, huma.Operation{
+		OperationID: "get-device",
+		Method:      http.MethodGet,
+		Path:        "/api/plugins/{plugin_id}/devices/{device_id}",
+		Summary:     "Get device",
+		Description: "Returns one device by ID.",
+		Tags:        []string{"devices"},
+	}, func(ctx context.Context, input *GetDeviceInput) (*GetDeviceOutput, error) {
+		resp := routeRPC(input.PluginID, "devices/list", nil)
+		if resp.Error != nil {
+			return nil, pluginErr(resp.Error.Message)
+		}
+		var devices []types.Device
+		if err := json.Unmarshal(resp.Result, &devices); err != nil {
+			return nil, pluginErr("failed to decode devices")
+		}
+		for _, d := range devices {
+			if d.ID == input.DeviceID {
+				return &GetDeviceOutput{Body: d}, nil
+			}
+		}
+		return nil, notFoundErr("device not found")
+	})
 }
 
 func registerEntityRoutes(api huma.API) {
@@ -634,6 +669,42 @@ func registerEntityRoutes(api huma.API) {
 	})
 
 	huma.Register(api, huma.Operation{
+		OperationID: "get-entity",
+		Method:      http.MethodGet,
+		Path:        "/api/plugins/{plugin_id}/devices/{device_id}/entities/{entity_id}",
+		Summary:     "Get entity",
+		Description: "Returns one entity by ID.",
+		Tags:        []string{"entities"},
+	}, func(ctx context.Context, input *GetEntityInput) (*GetEntityOutput, error) {
+		resp := routeRPC(input.PluginID, "entities/list", map[string]string{"device_id": input.DeviceID})
+		entities, err := parseEntities(resp)
+		if err != nil {
+			return nil, pluginErr(err.Error())
+		}
+		for _, e := range entities {
+			if e.ID == input.EntityID {
+				with := entityWithSchema{Entity: e}
+				if desc, ok := types.GetDomainDescriptor(e.Domain); ok {
+					filtered := filterDescriptor(desc, e.Actions)
+					with.Schema = &filtered
+				}
+				return &GetEntityOutput{Body: with}, nil
+			}
+		}
+		vstore.mu.RLock()
+		defer vstore.mu.RUnlock()
+		if rec, ok := vstore.entities[entityKey(input.PluginID, input.DeviceID, input.EntityID)]; ok {
+			with := entityWithSchema{Entity: rec.Entity}
+			if desc, ok := types.GetDomainDescriptor(rec.Entity.Domain); ok {
+				filtered := filterDescriptor(desc, rec.Entity.Actions)
+				with.Schema = &filtered
+			}
+			return &GetEntityOutput{Body: with}, nil
+		}
+		return nil, notFoundErr("entity not found")
+	})
+
+	huma.Register(api, huma.Operation{
 		OperationID:   "create-virtual-entity",
 		Method:        http.MethodPost,
 		Path:          "/api/plugins/{plugin_id}/devices/{device_id}/entities/virtual",
@@ -676,7 +747,7 @@ func registerEntityRoutes(api huma.API) {
 			ID: req.ID, DeviceID: input.DeviceID, Domain: source.Domain,
 			LocalName: localName, Actions: actions, Data: source.Data,
 		}
-		ent.Data.SyncStatus = "in_sync"
+		ent.Data.SyncStatus = types.SyncStatusSynced
 		ent.Data.UpdatedAt = time.Now().UTC()
 		rec := virtualEntityRecord{
 			OwnerPluginID: input.PluginID, OwnerDeviceID: input.DeviceID,
@@ -837,7 +908,7 @@ func registerCommandRoutes(api huma.API) {
 				SourceCommand: sourceStatus.CommandID, VirtualKey: key, Status: status,
 			}
 			vrec.Entity.Data.LastCommandID = virtualCID
-			vrec.Entity.Data.SyncStatus = "pending"
+			vrec.Entity.Data.SyncStatus = types.SyncStatusPending
 			vrec.Entity.Data.UpdatedAt = now
 			vstore.entities[key] = vrec
 			vstore.persistLocked()
@@ -927,7 +998,7 @@ func registerEventRoutes(api huma.API) {
 			vstore.mu.Lock()
 			vrec.Entity.Data.Reported = payload
 			vrec.Entity.Data.Effective = payload
-			vrec.Entity.Data.SyncStatus = "in_sync"
+			vrec.Entity.Data.SyncStatus = types.SyncStatusSynced
 			vrec.Entity.Data.LastEventID = nextID("vevt")
 			if correlationID != "" {
 				vrec.Entity.Data.LastCommandID = correlationID
