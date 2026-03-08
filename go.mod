@@ -8,8 +8,8 @@ require (
 	github.com/mark3labs/mcp-go v0.44.1
 	github.com/nats-io/nats.go v1.49.0
 	github.com/slidebolt/sdk-entities v1.20.0
-	github.com/slidebolt/sdk-runner v1.20.1
-	github.com/slidebolt/sdk-types v1.20.1
+	github.com/slidebolt/sdk-runner v1.20.2
+	github.com/slidebolt/sdk-types v1.20.3
 	github.com/swaggo/swag v1.16.6
 	modernc.org/sqlite v1.39.0
 )
