@@ -58,6 +58,23 @@ type RefreshDevicesInput struct {
 	PluginID string `path:"plugin_id" doc:"Plugin ID"`
 }
 
+type GetPluginLogLevelInput struct {
+	PluginID string `path:"plugin_id" doc:"Plugin ID"`
+}
+
+type SetPluginLogLevelInput struct {
+	PluginID string `path:"plugin_id" doc:"Plugin ID"`
+	Body     struct {
+		Level string `json:"level" doc:"Log level: trace|debug|info|warn|error"`
+	}
+}
+
+type PluginLogLevelOutput struct {
+	Body struct {
+		Level string `json:"level"`
+	}
+}
+
 type CreateDeviceInput struct {
 	PluginID string `path:"plugin_id" doc:"Plugin ID"`
 	Body     types.Device
@@ -156,6 +173,22 @@ type GetEntityInput struct {
 	EntityID string `path:"entity_id" doc:"Entity ID"`
 }
 type GetEntityOutput struct{ Body entityWithSchema }
+
+type GetEntityEventsInput struct {
+	PluginID string `path:"plugin_id" doc:"Plugin ID"`
+	DeviceID string `path:"device_id" doc:"Device ID"`
+	EntityID string `path:"entity_id" doc:"Entity ID"`
+}
+
+type entityEventsDescriptor struct {
+	PluginID    string                   `json:"plugin_id"`
+	DeviceID    string                   `json:"device_id"`
+	EntityID    string                   `json:"entity_id"`
+	Domain      string                   `json:"domain"`
+	ValidEvents []types.ActionDescriptor `json:"valid_events"`
+}
+
+type EntityEventsOutput struct{ Body entityEventsDescriptor }
 
 type CreateVirtualEntityInput struct {
 	PluginID string `path:"plugin_id" doc:"Plugin ID that will own the virtual entity"`
@@ -283,14 +316,22 @@ type SearchPluginsInput struct {
 type SearchPluginsOutput struct{ Body []types.Manifest }
 
 type SearchDevicesInput struct {
-	Pattern string   `query:"q" doc:"Glob-style search pattern (default: *)"`
-	Labels  []string `query:"label,explode" doc:"Label filters in key:value format. Multiple values use AND logic (e.g. room:kitchen)."`
+	Pattern  string   `query:"q" doc:"Glob-style search pattern (default: *)"`
+	Labels   []string `query:"label,explode" doc:"Label filters in key:value format. Multiple values use AND logic (e.g. room:kitchen)."`
+	PluginID string   `query:"plugin_id" doc:"Optional plugin scope."`
+	DeviceID string   `query:"device_id" doc:"Optional device scope."`
+	Limit    int      `query:"limit" doc:"Optional max results; applied after aggregation."`
 }
 type SearchDevicesOutput struct{ Body []types.Device }
 
 type SearchEntitiesInput struct {
-	Pattern string   `query:"q" doc:"Glob-style search pattern or text to search for (default: *)"`
-	Labels  []string `query:"label,explode" doc:"Label filters in key:value format. Multiple values use AND logic."`
+	Pattern  string   `query:"q" doc:"Glob-style search pattern or text to search for (default: *)"`
+	Labels   []string `query:"label,explode" doc:"Label filters in key:value format. Multiple values use AND logic."`
+	PluginID string   `query:"plugin_id" doc:"Optional plugin scope."`
+	DeviceID string   `query:"device_id" doc:"Optional device scope."`
+	EntityID string   `query:"entity_id" doc:"Optional entity scope."`
+	Domain   string   `query:"domain" doc:"Optional domain scope (e.g. light, switch)."`
+	Limit    int      `query:"limit" doc:"Optional max results; applied after aggregation."`
 }
 type SearchEntitiesOutput struct{ Body []types.Entity }
 
@@ -425,6 +466,52 @@ func registerDeviceRoutes(api huma.API) {
 		var devices []types.Device
 		json.Unmarshal(resp.Result, &devices)
 		return &ListDevicesOutput{Body: devices}, nil
+	})
+
+	huma.Register(api, huma.Operation{
+		OperationID: "get-plugin-log-level",
+		Method:      http.MethodGet,
+		Path:        "/api/plugins/{plugin_id}/logging/level",
+		Summary:     "Get plugin log level",
+		Description: "Returns current runtime log level for one plugin process.",
+		Tags:        []string{"plugins"},
+	}, func(ctx context.Context, input *GetPluginLogLevelInput) (*PluginLogLevelOutput, error) {
+		resp := routeRPC(input.PluginID, "logging/get_level", nil)
+		if resp.Error != nil {
+			return nil, pluginErr(resp.Error.Message)
+		}
+		var out struct {
+			Level string `json:"level"`
+		}
+		if err := json.Unmarshal(resp.Result, &out); err != nil {
+			return nil, pluginErr("failed to decode plugin log level response")
+		}
+		return &PluginLogLevelOutput{Body: out}, nil
+	})
+
+	huma.Register(api, huma.Operation{
+		OperationID: "set-plugin-log-level",
+		Method:      http.MethodPut,
+		Path:        "/api/plugins/{plugin_id}/logging/level",
+		Summary:     "Set plugin log level",
+		Description: "Updates runtime log level for one plugin process without restart.",
+		Tags:        []string{"plugins"},
+	}, func(ctx context.Context, input *SetPluginLogLevelInput) (*PluginLogLevelOutput, error) {
+		level := strings.TrimSpace(strings.ToLower(input.Body.Level))
+		if level == "" {
+			return nil, badReqErr("level is required")
+		}
+		resp := routeRPC(input.PluginID, "logging/set_level", map[string]string{"level": level})
+		if resp.Error != nil {
+			return nil, pluginErr(resp.Error.Message)
+		}
+		var out struct {
+			Level string `json:"level"`
+		}
+		if err := json.Unmarshal(resp.Result, &out); err != nil {
+			return nil, pluginErr("failed to decode plugin log level response")
+		}
+		return &PluginLogLevelOutput{Body: out}, nil
 	})
 
 	huma.Register(api, huma.Operation{
@@ -702,6 +789,53 @@ func registerEntityRoutes(api huma.API) {
 			return &GetEntityOutput{Body: with}, nil
 		}
 		return nil, notFoundErr("entity not found")
+	})
+
+	huma.Register(api, huma.Operation{
+		OperationID: "get-entity-valid-events",
+		Method:      http.MethodGet,
+		Path:        "/api/plugins/{plugin_id}/devices/{device_id}/entities/{entity_id}/events",
+		Summary:     "Get valid events for entity",
+		Description: "Returns the canonical valid event types and required fields for this entity based on its domain schema and action capabilities.",
+		Tags:        []string{"entities", "schema"},
+	}, func(ctx context.Context, input *GetEntityEventsInput) (*EntityEventsOutput, error) {
+		resp := routeRPC(input.PluginID, "entities/list", map[string]string{"device_id": input.DeviceID})
+		entities, err := parseEntities(resp)
+		if err != nil {
+			return nil, pluginErr(err.Error())
+		}
+
+		var target *types.Entity
+		for i := range entities {
+			if entities[i].ID == input.EntityID {
+				target = &entities[i]
+				break
+			}
+		}
+		if target == nil {
+			vstore.mu.RLock()
+			if rec, ok := vstore.entities[entityKey(input.PluginID, input.DeviceID, input.EntityID)]; ok {
+				copyEnt := rec.Entity
+				target = &copyEnt
+			}
+			vstore.mu.RUnlock()
+		}
+		if target == nil {
+			return nil, notFoundErr("entity not found")
+		}
+
+		desc, ok := types.GetDomainDescriptor(target.Domain)
+		if !ok {
+			return nil, notFoundErr("domain schema not found for entity")
+		}
+		filtered := filterDescriptor(desc, target.Actions)
+		return &EntityEventsOutput{Body: entityEventsDescriptor{
+			PluginID:    input.PluginID,
+			DeviceID:    input.DeviceID,
+			EntityID:    input.EntityID,
+			Domain:      target.Domain,
+			ValidEvents: filtered.Events,
+		}}, nil
 	})
 
 	huma.Register(api, huma.Operation{
@@ -1205,7 +1339,13 @@ func registerSearchRoutes(api huma.API) {
 			rawLabels = input.Labels
 		}
 
-		query := types.SearchQuery{Pattern: pattern, Labels: parseLabels(rawLabels)}
+		query := types.SearchQuery{
+			Pattern:  pattern,
+			Labels:   parseLabels(rawLabels),
+			PluginID: strings.TrimSpace(input.PluginID),
+			DeviceID: strings.TrimSpace(input.DeviceID),
+			Limit:    input.Limit,
+		}
 		data, _ := json.Marshal(query)
 		results := make([]types.Device, 0)
 
@@ -1256,6 +1396,9 @@ func registerSearchRoutes(api huma.API) {
 			regMu.Unlock()
 		}
 
+		if query.Limit > 0 && len(results) > query.Limit {
+			results = results[:query.Limit]
+		}
 		return &SearchDevicesOutput{Body: results}, nil
 	})
 
@@ -1279,7 +1422,15 @@ func registerSearchRoutes(api huma.API) {
 			rawLabels = input.Labels
 		}
 
-		query := types.SearchQuery{Pattern: pattern, Labels: parseLabels(rawLabels)}
+		query := types.SearchQuery{
+			Pattern:  pattern,
+			Labels:   parseLabels(rawLabels),
+			PluginID: strings.TrimSpace(input.PluginID),
+			DeviceID: strings.TrimSpace(input.DeviceID),
+			EntityID: strings.TrimSpace(input.EntityID),
+			Domain:   strings.TrimSpace(input.Domain),
+			Limit:    input.Limit,
+		}
 		data, _ := json.Marshal(query)
 		results := make([]types.Entity, 0)
 
@@ -1330,6 +1481,9 @@ func registerSearchRoutes(api huma.API) {
 			regMu.Unlock()
 		}
 
+		if query.Limit > 0 && len(results) > query.Limit {
+			results = results[:query.Limit]
+		}
 		return &SearchEntitiesOutput{Body: results}, nil
 	})
 }

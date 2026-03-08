@@ -53,6 +53,11 @@ type BatchDeleteEntitiesInput struct {
 }
 type BatchDeleteEntitiesOutput struct{ Body []types.BatchResult }
 
+type BatchCreateCommandsInput struct {
+	Body []types.BatchCommandItem `doc:"List of (plugin_id, device_id, entity_id, payload) items to send as commands"`
+}
+type BatchCreateCommandsOutput struct{ Body []types.BatchCommandResult }
+
 // ---------------------------------------------------------------------------
 // Route registration
 // ---------------------------------------------------------------------------
@@ -144,6 +149,17 @@ func registerBatchRoutes(api huma.API) {
 		Tags:        []string{"batch"},
 	}, func(ctx context.Context, input *BatchDeleteEntitiesInput) (*BatchDeleteEntitiesOutput, error) {
 		return &BatchDeleteEntitiesOutput{Body: batchDeleteEntities(input.Body)}, nil
+	})
+
+	huma.Register(api, huma.Operation{
+		OperationID: "batch-create-commands",
+		Method:      http.MethodPost,
+		Path:        "/api/batch/commands",
+		Summary:     "Create commands",
+		Description: "Sends multiple commands across plugins in a single call. Returns one result per item in input order.",
+		Tags:        []string{"batch"},
+	}, func(ctx context.Context, input *BatchCreateCommandsInput) (*BatchCreateCommandsOutput, error) {
+		return &BatchCreateCommandsOutput{Body: batchCreateCommands(input.Body)}, nil
 	})
 }
 
@@ -323,6 +339,39 @@ func batchDeleteEntities(refs []types.BatchEntityRef) []types.BatchResult {
 		} else {
 			r.OK = true
 		}
+		results[i] = r
+	}
+	return results
+}
+
+func batchCreateCommands(items []types.BatchCommandItem) []types.BatchCommandResult {
+	results := make([]types.BatchCommandResult, len(items))
+	for i, item := range items {
+		r := types.BatchCommandResult{
+			PluginID: item.PluginID,
+			DeviceID: item.DeviceID,
+			EntityID: item.EntityID,
+		}
+		params := map[string]any{
+			"device_id": item.DeviceID,
+			"entity_id": item.EntityID,
+			"payload":   item.Payload,
+		}
+		resp := routeRPC(item.PluginID, "entities/commands/create", params)
+		if resp.Error != nil {
+			r.Error = resp.Error.Message
+			results[i] = r
+			continue
+		}
+		var status types.CommandStatus
+		if err := json.Unmarshal(resp.Result, &status); err != nil {
+			r.Error = err.Error()
+			results[i] = r
+			continue
+		}
+		r.OK = true
+		r.CommandID = status.CommandID
+		r.State = status.State
 		results[i] = r
 	}
 	return results
