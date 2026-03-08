@@ -1,2 +1,4 @@
 .build/
 gateway
+
+scripts/.release_guard
