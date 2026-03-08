@@ -71,6 +71,8 @@ func run() {
 	}
 	defer nc.Close()
 
+	startNATSDiscoveryBridge()
+
 	js, err = nc.JetStream()
 	if err != nil {
 		log.Fatalf("Gateway: failed to initialize JetStream: %v", err)
