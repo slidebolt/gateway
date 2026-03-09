@@ -256,7 +256,7 @@ type DeleteScriptStateInput struct {
 
 // --- Snapshots ---
 
-type SaveSnapshotInput struct {
+type CreateSnapshotInput struct {
 	PluginID string `path:"plugin_id" doc:"Plugin ID"`
 	DeviceID string `path:"device_id" doc:"Device ID"`
 	EntityID string `path:"entity_id" doc:"Entity ID"`
@@ -288,7 +288,7 @@ type SendCommandInput struct {
 	PluginID string         `path:"plugin_id" doc:"Plugin ID"`
 	DeviceID string         `path:"device_id" doc:"Device ID"`
 	EntityID string         `path:"entity_id" doc:"Entity ID"`
-	Body     map[string]any `doc:"Domain-specific command payload. Must include an 'action' field (e.g. {\"action\":\"turn_on\"})."`
+	Body     map[string]any `doc:"Domain-specific command payload. Must include a 'type' field (e.g. {\"type\":\"turn_on\"})."`
 }
 type CommandStatusOutput struct{ Body types.CommandStatus }
 
@@ -308,7 +308,7 @@ type IngestEventInput struct {
 	DeviceID      string         `path:"device_id" doc:"Device ID"`
 	EntityID      string         `path:"entity_id" doc:"Entity ID"`
 	CorrelationID string         `header:"X-Correlation-ID" doc:"Optional command ID this event is responding to. Marks that command as succeeded."`
-	Body          map[string]any `doc:"Domain-specific event payload. Must include an 'action' field (e.g. {\"action\":\"state\",\"on\":true})."`
+	Body          map[string]any `doc:"Domain-specific event payload. Must include a 'type' field (e.g. {\"type\":\"state\",\"on\":true})."`
 }
 type IngestEventOutput struct{ Body types.Entity }
 
@@ -1033,7 +1033,7 @@ func registerSnapshotRoutes(api huma.API) {
 		Summary:     "Save entity snapshot",
 		Description: "Captures the current effective state of an entity as a named snapshot. Returns the snapshot with its assigned UUID.",
 		Tags:        []string{"snapshots"},
-	}, func(ctx context.Context, input *SaveSnapshotInput) (*SnapshotOutput, error) {
+	}, func(ctx context.Context, input *CreateSnapshotInput) (*SnapshotOutput, error) {
 		params := map[string]any{
 			"device_id": input.DeviceID,
 			"entity_id": input.EntityID,

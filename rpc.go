@@ -27,7 +27,9 @@ func routeRPC(pluginID, method string, params any) types.Response {
 		return types.Response{JSONRPC: types.JSONRPCVersion, Error: &types.RPCError{Code: -32000, Message: "plugin timeout"}}
 	}
 	var resp types.Response
-	json.Unmarshal(msg.Data, &resp)
+	if err := json.Unmarshal(msg.Data, &resp); err != nil {
+		return types.Response{JSONRPC: types.JSONRPCVersion, Error: &types.RPCError{Code: -32700, Message: "malformed response from plugin"}}
+	}
 	return resp
 }
 
