@@ -16,6 +16,7 @@ import (
 	"github.com/danielgtaylor/huma/v2/adapters/humagin"
 	"github.com/gin-gonic/gin"
 	"github.com/nats-io/nats.go"
+	regsvc "github.com/slidebolt/registry"
 	runner "github.com/slidebolt/sdk-runner"
 	"github.com/slidebolt/sdk-types"
 )
@@ -70,6 +71,10 @@ func run() {
 		log.Fatalf("Gateway: failed to connect to NATS after 10 attempts: %v", err)
 	}
 	defer nc.Close()
+
+	masterRegistry = regsvc.NewService()
+	_ = masterRegistry.Ingest(nc)
+	hydrateRegistryFromVStore()
 
 	startNATSDiscoveryBridge()
 
@@ -215,23 +220,7 @@ func selfRegister(rpcSubject string) {
 		_ = m.Respond(data)
 	})
 
-	_, _ = nc.Subscribe(runner.SubjectSearchDevices, func(m *nats.Msg) {
-		res := types.SearchDevicesResponse{
-			PluginID: gatewayID,
-			Matches:  []types.Device{},
-		}
-		data, _ := json.Marshal(res)
-		_ = m.Respond(data)
-	})
 
-	_, _ = nc.Subscribe(runner.SubjectSearchEntities, func(m *nats.Msg) {
-		res := types.SearchEntitiesResponse{
-			PluginID: gatewayID,
-			Matches:  []types.Entity{},
-		}
-		data, _ := json.Marshal(res)
-		_ = m.Respond(data)
-	})
 
 	_ = nc.Publish(runner.SubjectRegistration, regData)
 	_, _ = nc.Subscribe(runner.SubjectDiscoveryProbe, func(m *nats.Msg) {
@@ -246,4 +235,15 @@ func startDiscoveryProbe() {
 			time.Sleep(2 * time.Second)
 		}
 	}()
+}
+
+func hydrateRegistryFromVStore() {
+	if vstore == nil || masterRegistry == nil {
+		return
+	}
+	vstore.mu.RLock()
+	defer vstore.mu.RUnlock()
+	for _, rec := range vstore.entities {
+		masterRegistry.UpdateEntity(rec.OwnerPluginID, rec.Entity)
+	}
 }

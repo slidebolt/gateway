@@ -58,5 +58,6 @@ func subscribeEntityEvents() {
 		}
 		vstore.persistLocked()
 		vstore.mu.Unlock()
+		go broadcastProjectedMirrors(env)
 	})
 }

@@ -4,10 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"log"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -15,6 +15,7 @@ import (
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/gin-gonic/gin"
 	"github.com/nats-io/nats.go"
+	regsvc "github.com/slidebolt/registry"
 	runner "github.com/slidebolt/sdk-runner"
 	"github.com/slidebolt/sdk-types"
 )
@@ -199,13 +200,32 @@ type CreateVirtualEntityInput struct {
 		ID             string   `json:"id" doc:"ID for the virtual entity (must be unique within the device)"`
 		LocalName      string   `json:"local_name,omitempty" doc:"Display name (defaults to source entity's local_name)"`
 		Actions        []string `json:"actions,omitempty" doc:"Subset of actions to expose (defaults to source entity's actions)"`
-		SourcePluginID string   `json:"source_plugin_id" doc:"Plugin ID of the source entity"`
-		SourceDeviceID string   `json:"source_device_id" doc:"Device ID of the source entity"`
-		SourceEntityID string   `json:"source_entity_id" doc:"Entity ID of the source entity"`
-		MirrorSource   *bool    `json:"mirror_source,omitempty" doc:"Keep virtual entity state in sync with source (default: true)"`
+		SourcePluginID string   `json:"source_plugin_id,omitempty" doc:"Plugin ID of the source entity (mirror mode)"`
+		SourceDeviceID string   `json:"source_device_id,omitempty" doc:"Device ID of the source entity (mirror mode)"`
+		SourceEntityID string   `json:"source_entity_id,omitempty" doc:"Entity ID of the source entity (mirror mode)"`
+		SourceQuery    string   `json:"source_query,omitempty" doc:"Search query defining group members (group mode)"`
+		Domain         string   `json:"domain,omitempty" doc:"Entity domain for group mode (e.g. light, switch)"`
+		MirrorSource   *bool    `json:"mirror_source,omitempty" doc:"Keep virtual entity state in sync with source (default: true; mirror mode only)"`
 	}
 }
 type VirtualEntityOutput struct{ Body types.Entity }
+
+type PatchVirtualEntityConfigInput struct {
+	PluginID string `path:"plugin_id" doc:"Plugin ID that owns the virtual entity"`
+	DeviceID string `path:"device_id" doc:"Device ID that owns the virtual entity"`
+	EntityID string `path:"entity_id" doc:"Virtual entity ID"`
+	Body     struct {
+		LocalName      *string             `json:"local_name,omitempty" doc:"Optional display name override"`
+		Actions        []string            `json:"actions,omitempty" doc:"Optional action list override; empty means default for domain"`
+		Labels         map[string][]string `json:"labels,omitempty" doc:"Optional labels override"`
+		SourcePluginID *string             `json:"source_plugin_id,omitempty" doc:"Mirror source plugin ID"`
+		SourceDeviceID *string             `json:"source_device_id,omitempty" doc:"Mirror source device ID"`
+		SourceEntityID *string             `json:"source_entity_id,omitempty" doc:"Mirror source entity ID"`
+		SourceQuery    *string             `json:"source_query,omitempty" doc:"Group source query"`
+		Domain         *string             `json:"domain,omitempty" doc:"Domain override (required when resolving unknown mirror sources)"`
+		MirrorSource   *bool               `json:"mirror_source,omitempty" doc:"Mirror source state/events for mirror mode"`
+	}
+}
 
 // --- Scripts ---
 
@@ -337,6 +357,14 @@ type EntityRatesInput struct {
 	Window   int    `query:"window" doc:"Window size in seconds (default: 30)"`
 }
 type EntityRatesOutput struct{ Body []entityRate }
+
+type TraceEntityInput struct {
+	PluginID string `path:"plugin_id"`
+	DeviceID string `path:"device_id"`
+	EntityID string `path:"entity_id"`
+	Since    string `query:"since" doc:"RFC3339 timestamp; returns entries strictly after this time. Defaults to now."`
+}
+type TraceOutput struct{ Body []traceEntry }
 
 // --- Search ---
 
@@ -557,6 +585,9 @@ func registerDeviceRoutes(api huma.API) {
 		if resp.Error != nil {
 			return nil, pluginErr(resp.Error.Message)
 		}
+		if strings.TrimSpace(input.Body.EntityQuery) != "" {
+			hasProjectionDevices.Store(true)
+		}
 		return &DeviceOutput{Body: resp.Result}, nil
 	})
 
@@ -571,6 +602,9 @@ func registerDeviceRoutes(api huma.API) {
 		resp := routeRPC(input.PluginID, "devices/update", input.Body)
 		if resp.Error != nil {
 			return nil, pluginErr(resp.Error.Message)
+		}
+		if strings.TrimSpace(input.Body.EntityQuery) != "" {
+			hasProjectionDevices.Store(true)
 		}
 		broker.broadcast(sseMessage{Type: "device", PluginID: input.PluginID, DeviceID: input.Body.ID})
 		return &DeviceOutput{Body: resp.Result}, nil
@@ -666,6 +700,9 @@ func registerEntityRoutes(api huma.API) {
 		Description: "Returns all entities for a device, including virtual entities. Each entity includes an inline schema describing the domain's available commands and events.",
 		Tags:        []string{"entities"},
 	}, func(ctx context.Context, input *ListEntitiesInput) (*ListEntitiesOutput, error) {
+		if entities, projected, err := projectedEntitiesForDevice(input.PluginID, input.DeviceID); err == nil && projected {
+			return &ListEntitiesOutput{Body: withSchema(entities)}, nil
+		}
 		resp := routeRPC(input.PluginID, "entities/list", map[string]string{"device_id": input.DeviceID})
 		entities, err := parseEntities(resp)
 		if err != nil {
@@ -722,6 +759,48 @@ func registerEntityRoutes(api huma.API) {
 		Tags:        []string{"entities"},
 	}, func(ctx context.Context, input *UpdateEntityInput) (*EntityOutput, error) {
 		input.Body.DeviceID = input.DeviceID
+		key := entityKey(input.PluginID, input.DeviceID, input.Body.ID)
+		vstore.mu.Lock()
+		if rec, ok := vstore.entities[key]; ok {
+			merged := rec.Entity
+			if input.Body.LocalName != "" {
+				merged.LocalName = input.Body.LocalName
+			}
+			if input.Body.Domain != "" {
+				merged.Domain = input.Body.Domain
+			}
+			if len(input.Body.Actions) > 0 {
+				merged.Actions = append([]string(nil), input.Body.Actions...)
+			}
+			if input.Body.Labels != nil {
+				merged.Labels = input.Body.Labels
+			}
+			if len(input.Body.Data.Desired) > 0 || len(input.Body.Data.Reported) > 0 || len(input.Body.Data.Effective) > 0 {
+				merged.Data = input.Body.Data
+			}
+			merged.DeviceID = input.DeviceID
+			merged.ID = input.Body.ID
+			rec.Entity = merged
+			vstore.entities[key] = rec
+			masterRegistry.UpdateEntity(input.PluginID, rec.Entity)
+			vstore.persistLocked()
+			vstore.mu.Unlock()
+			out, _ := json.Marshal(rec.Entity)
+			return &EntityOutput{Body: out}, nil
+		}
+		vstore.mu.Unlock()
+
+		if projected, hasProjection, err := resolveProjectedEntity(input.PluginID, input.DeviceID, input.Body.ID); err == nil && hasProjection && projected.ID != "" {
+			body := input.Body
+			body.DeviceID = projected.DeviceID
+			body.ID = projected.ID
+			resp := routeRPC(projected.PluginID, "entities/update", body)
+			if resp.Error != nil {
+				return nil, pluginErr(resp.Error.Message)
+			}
+			return &EntityOutput{Body: resp.Result}, nil
+		}
+
 		resp := routeRPC(input.PluginID, "entities/update", input.Body)
 		if resp.Error != nil {
 			return nil, pluginErr(resp.Error.Message)
@@ -741,6 +820,35 @@ func registerEntityRoutes(api huma.API) {
 		if name == "" {
 			return nil, badReqErr("local_name is required")
 		}
+		key := entityKey(input.PluginID, input.DeviceID, input.EntityID)
+		vstore.mu.Lock()
+		if rec, ok := vstore.entities[key]; ok {
+			rec.Entity.LocalName = name
+			rec.Entity.Data.UpdatedAt = time.Now().UTC()
+			vstore.entities[key] = rec
+			masterRegistry.UpdateEntity(input.PluginID, rec.Entity)
+			vstore.persistLocked()
+			vstore.mu.Unlock()
+			out, _ := json.Marshal(rec.Entity)
+			broker.broadcast(sseMessage{Type: "entity", PluginID: input.PluginID, DeviceID: input.DeviceID, EntityID: input.EntityID})
+			return &EntityOutput{Body: out}, nil
+		}
+		vstore.mu.Unlock()
+
+		if projected, hasProjection, err := resolveProjectedEntity(input.PluginID, input.DeviceID, input.EntityID); err == nil && hasProjection && projected.ID != "" {
+			source, ferr := findEntity(projected.PluginID, projected.DeviceID, projected.ID)
+			if ferr != nil {
+				return nil, pluginErr(ferr.Error())
+			}
+			source.LocalName = name
+			resp := routeRPC(projected.PluginID, "entities/update", source)
+			if resp.Error != nil {
+				return nil, pluginErr(resp.Error.Message)
+			}
+			broker.broadcast(sseMessage{Type: "entity", PluginID: input.PluginID, DeviceID: input.DeviceID, EntityID: input.EntityID})
+			return &EntityOutput{Body: resp.Result}, nil
+		}
+
 		payload := types.Entity{ID: input.EntityID, DeviceID: input.DeviceID, LocalName: name}
 		resp := routeRPC(input.PluginID, "entities/update", payload)
 		if resp.Error != nil {
@@ -761,6 +869,35 @@ func registerEntityRoutes(api huma.API) {
 		if len(input.Body.Labels) == 0 {
 			return nil, badReqErr("labels is required")
 		}
+		key := entityKey(input.PluginID, input.DeviceID, input.EntityID)
+		vstore.mu.Lock()
+		if rec, ok := vstore.entities[key]; ok {
+			rec.Entity.Labels = input.Body.Labels
+			rec.Entity.Data.UpdatedAt = time.Now().UTC()
+			vstore.entities[key] = rec
+			masterRegistry.UpdateEntity(input.PluginID, rec.Entity)
+			vstore.persistLocked()
+			vstore.mu.Unlock()
+			out, _ := json.Marshal(rec.Entity)
+			broker.broadcast(sseMessage{Type: "entity", PluginID: input.PluginID, DeviceID: input.DeviceID, EntityID: input.EntityID})
+			return &EntityOutput{Body: out}, nil
+		}
+		vstore.mu.Unlock()
+
+		if projected, hasProjection, err := resolveProjectedEntity(input.PluginID, input.DeviceID, input.EntityID); err == nil && hasProjection && projected.ID != "" {
+			source, ferr := findEntity(projected.PluginID, projected.DeviceID, projected.ID)
+			if ferr != nil {
+				return nil, pluginErr(ferr.Error())
+			}
+			source.Labels = input.Body.Labels
+			resp := routeRPC(projected.PluginID, "entities/update", source)
+			if resp.Error != nil {
+				return nil, pluginErr(resp.Error.Message)
+			}
+			broker.broadcast(sseMessage{Type: "entity", PluginID: input.PluginID, DeviceID: input.DeviceID, EntityID: input.EntityID})
+			return &EntityOutput{Body: resp.Result}, nil
+		}
+
 		payload := types.Entity{ID: input.EntityID, DeviceID: input.DeviceID, Labels: input.Body.Labels}
 		resp := routeRPC(input.PluginID, "entities/update", payload)
 		if resp.Error != nil {
@@ -778,6 +915,32 @@ func registerEntityRoutes(api huma.API) {
 		Description: "Deletes an entity from a device.",
 		Tags:        []string{"entities"},
 	}, func(ctx context.Context, input *DeleteEntityInput) (*DeleteOutput, error) {
+		key := entityKey(input.PluginID, input.DeviceID, input.EntityID)
+		vstore.mu.Lock()
+		if _, ok := vstore.entities[key]; ok {
+			delete(vstore.entities, key)
+			for cid, cmd := range vstore.commands {
+				if cmd.VirtualKey == key {
+					delete(vstore.commands, cid)
+				}
+			}
+			masterRegistry.DeleteEntity(input.PluginID, input.DeviceID, input.EntityID)
+			vstore.persistLocked()
+			vstore.mu.Unlock()
+			out, _ := json.Marshal(true)
+			return &DeleteOutput{Body: out}, nil
+		}
+		vstore.mu.Unlock()
+
+		if projected, hasProjection, err := resolveProjectedEntity(input.PluginID, input.DeviceID, input.EntityID); err == nil && hasProjection && projected.ID != "" {
+			params := map[string]string{"device_id": projected.DeviceID, "entity_id": projected.ID}
+			resp := routeRPC(projected.PluginID, "entities/delete", params)
+			if resp.Error != nil {
+				return nil, pluginErr(resp.Error.Message)
+			}
+			return &DeleteOutput{Body: resp.Result}, nil
+		}
+
 		params := map[string]string{"device_id": input.DeviceID, "entity_id": input.EntityID}
 		resp := routeRPC(input.PluginID, "entities/delete", params)
 		if resp.Error != nil {
@@ -794,6 +957,16 @@ func registerEntityRoutes(api huma.API) {
 		Description: "Returns one entity by ID.",
 		Tags:        []string{"entities"},
 	}, func(ctx context.Context, input *GetEntityInput) (*GetEntityOutput, error) {
+		if projected, hasProjection, err := resolveProjectedEntity(input.PluginID, input.DeviceID, input.EntityID); err == nil && hasProjection && projected.ID != "" {
+			e := projected.Entity
+			e.DeviceID = input.DeviceID
+			with := entityWithSchema{Entity: e}
+			if desc, ok := types.GetDomainDescriptor(e.Domain); ok {
+				filtered := filterDescriptor(desc, e.Actions)
+				with.Schema = &filtered
+			}
+			return &GetEntityOutput{Body: with}, nil
+		}
 		resp := routeRPC(input.PluginID, "entities/list", map[string]string{"device_id": input.DeviceID})
 		entities, err := parseEntities(resp)
 		if err != nil {
@@ -830,6 +1003,23 @@ func registerEntityRoutes(api huma.API) {
 		Description: "Returns the canonical valid event types and required fields for this entity based on its domain schema and action capabilities.",
 		Tags:        []string{"entities", "schema"},
 	}, func(ctx context.Context, input *GetEntityEventsInput) (*EntityEventsOutput, error) {
+		if projected, hasProjection, err := resolveProjectedEntity(input.PluginID, input.DeviceID, input.EntityID); err == nil && hasProjection && projected.ID != "" {
+			target := projected.Entity
+			target.DeviceID = input.DeviceID
+			desc, ok := types.GetDomainDescriptor(target.Domain)
+			if !ok {
+				return nil, notFoundErr("domain schema not found for entity")
+			}
+			filtered := filterDescriptor(desc, target.Actions)
+			return &EntityEventsOutput{Body: entityEventsDescriptor{
+				PluginID:    input.PluginID,
+				DeviceID:    input.DeviceID,
+				EntityID:    input.EntityID,
+				Domain:      target.Domain,
+				ValidEvents: filtered.Events,
+			}}, nil
+		}
+
 		resp := routeRPC(input.PluginID, "entities/list", map[string]string{"device_id": input.DeviceID})
 		entities, err := parseEntities(resp)
 		if err != nil {
@@ -879,8 +1069,22 @@ func registerEntityRoutes(api huma.API) {
 		DefaultStatus: http.StatusCreated,
 	}, func(ctx context.Context, input *CreateVirtualEntityInput) (*VirtualEntityOutput, error) {
 		req := input.Body
-		if req.ID == "" || req.SourcePluginID == "" || req.SourceDeviceID == "" || req.SourceEntityID == "" {
-			return nil, badReqErr("id, source_plugin_id, source_device_id, source_entity_id are required")
+		if req.ID == "" {
+			return nil, badReqErr("id is required")
+		}
+		hasMirror := req.SourcePluginID != "" || req.SourceDeviceID != "" || req.SourceEntityID != ""
+		hasGroup := strings.TrimSpace(req.SourceQuery) != ""
+		if hasMirror && hasGroup {
+			return nil, badReqErr("provide either source_query (group mode) or source_plugin_id/source_device_id/source_entity_id (mirror mode), not both")
+		}
+		if !hasMirror && !hasGroup {
+			return nil, badReqErr("source_query or mirror source fields are required")
+		}
+		if hasMirror && (req.SourcePluginID == "" || req.SourceDeviceID == "" || req.SourceEntityID == "") {
+			return nil, badReqErr("source_plugin_id, source_device_id, and source_entity_id are required for mirror mode")
+		}
+		if hasGroup && strings.TrimSpace(req.Domain) == "" {
+			return nil, badReqErr("domain is required when source_query is provided")
 		}
 		key := entityKey(input.PluginID, input.DeviceID, req.ID)
 		if _, err := findEntity(input.PluginID, input.DeviceID, req.ID); err == nil {
@@ -892,39 +1096,215 @@ func registerEntityRoutes(api huma.API) {
 		if exists {
 			return nil, conflictErr("virtual entity id already exists")
 		}
-		source, err := findEntity(req.SourcePluginID, req.SourceDeviceID, req.SourceEntityID)
-		if err != nil {
-			return nil, pluginErr("source entity not found")
-		}
 		mirror := true
 		if req.MirrorSource != nil {
 			mirror = *req.MirrorSource
 		}
-		actions := req.Actions
-		if len(actions) == 0 {
-			actions = append([]string(nil), source.Actions...)
-		}
 		localName := req.LocalName
-		if localName == "" {
-			localName = source.LocalName
+		actions := req.Actions
+		entDomain := strings.TrimSpace(req.Domain)
+		entData := types.EntityData{}
+		unresolvedMirror := false
+
+		if hasMirror {
+			source, err := findEntity(req.SourcePluginID, req.SourceDeviceID, req.SourceEntityID)
+			if err == nil {
+				if len(actions) == 0 {
+					actions = append([]string(nil), source.Actions...)
+				}
+				if localName == "" {
+					localName = source.LocalName
+				}
+				entDomain = source.Domain
+				entData = source.Data
+			} else {
+				unresolvedMirror = true
+				if entDomain == "" {
+					return nil, badReqErr("domain is required when mirror source is unresolved")
+				}
+				if localName == "" {
+					localName = req.ID
+				}
+				if len(actions) == 0 {
+					actions = defaultActionsForDomain(entDomain)
+				}
+			}
+		} else {
+			if localName == "" {
+				localName = req.ID
+			}
+			if len(actions) == 0 {
+				actions = defaultActionsForDomain(entDomain)
+			}
 		}
 		ent := types.Entity{
-			ID: req.ID, DeviceID: input.DeviceID, Domain: source.Domain,
-			LocalName: localName, Actions: actions, Data: source.Data,
+			ID: req.ID, DeviceID: input.DeviceID, Domain: entDomain,
+			LocalName: localName, Actions: actions, Data: entData,
 		}
-		ent.Data.SyncStatus = types.SyncStatusSynced
+		if hasGroup {
+			if ent.Labels == nil {
+				ent.Labels = map[string][]string{}
+			}
+			ent.Labels["virtual_source_query"] = []string{strings.TrimSpace(req.SourceQuery)}
+		}
+		if unresolvedMirror {
+			ent.Data.SyncStatus = types.SyncStatusFailed
+		} else {
+			ent.Data.SyncStatus = types.SyncStatusSynced
+		}
 		ent.Data.UpdatedAt = time.Now().UTC()
 		rec := virtualEntityRecord{
 			OwnerPluginID: input.PluginID, OwnerDeviceID: input.DeviceID,
 			SourcePluginID: req.SourcePluginID, SourceDeviceID: req.SourceDeviceID,
-			SourceEntityID: req.SourceEntityID, MirrorSource: mirror, Entity: ent,
+			SourceEntityID: req.SourceEntityID, SourceQuery: strings.TrimSpace(req.SourceQuery),
+			SourceDomain: strings.TrimSpace(req.Domain), MirrorSource: mirror, Entity: ent,
 		}
 		vstore.mu.Lock()
 		vstore.entities[key] = rec
+		masterRegistry.UpdateEntity(input.PluginID, rec.Entity)
 		vstore.persistLocked()
 		vstore.mu.Unlock()
 		return &VirtualEntityOutput{Body: ent}, nil
 	})
+
+	huma.Register(api, huma.Operation{
+		OperationID: "patch-virtual-entity-config",
+		Method:      http.MethodPatch,
+		Path:        "/api/plugins/{plugin_id}/devices/{device_id}/entities/{entity_id}/virtual",
+		Summary:     "Patch virtual entity config",
+		Description: "Updates virtual-specific routing fields (mirror source or group query) and optional entity metadata.",
+		Tags:        []string{"entities"},
+	}, func(ctx context.Context, input *PatchVirtualEntityConfigInput) (*VirtualEntityOutput, error) {
+		key := entityKey(input.PluginID, input.DeviceID, input.EntityID)
+
+		vstore.mu.Lock()
+		rec, ok := vstore.entities[key]
+		if !ok {
+			vstore.mu.Unlock()
+			return nil, notFoundErr("virtual entity not found")
+		}
+
+		if input.Body.LocalName != nil {
+			rec.Entity.LocalName = strings.TrimSpace(*input.Body.LocalName)
+		}
+		if input.Body.Labels != nil {
+			rec.Entity.Labels = input.Body.Labels
+		}
+		if input.Body.MirrorSource != nil {
+			rec.MirrorSource = *input.Body.MirrorSource
+		}
+		if input.Body.Domain != nil {
+			rec.SourceDomain = strings.TrimSpace(*input.Body.Domain)
+			if rec.SourceDomain != "" {
+				rec.Entity.Domain = rec.SourceDomain
+			}
+		}
+
+		// Apply routing mode updates.
+		if input.Body.SourceQuery != nil {
+			rec.SourceQuery = strings.TrimSpace(*input.Body.SourceQuery)
+			if rec.SourceQuery != "" {
+				rec.SourcePluginID = ""
+				rec.SourceDeviceID = ""
+				rec.SourceEntityID = ""
+			}
+		}
+		if input.Body.SourcePluginID != nil {
+			rec.SourcePluginID = strings.TrimSpace(*input.Body.SourcePluginID)
+		}
+		if input.Body.SourceDeviceID != nil {
+			rec.SourceDeviceID = strings.TrimSpace(*input.Body.SourceDeviceID)
+		}
+		if input.Body.SourceEntityID != nil {
+			rec.SourceEntityID = strings.TrimSpace(*input.Body.SourceEntityID)
+		}
+
+		hasGroup := strings.TrimSpace(rec.SourceQuery) != ""
+		hasMirror := rec.SourcePluginID != "" || rec.SourceDeviceID != "" || rec.SourceEntityID != ""
+		if hasGroup && hasMirror {
+			vstore.mu.Unlock()
+			return nil, badReqErr("virtual entity cannot have both source_query and mirror source fields")
+		}
+		if !hasGroup && !hasMirror {
+			vstore.mu.Unlock()
+			return nil, badReqErr("virtual entity must define either source_query or mirror source fields")
+		}
+		if hasMirror && (rec.SourcePluginID == "" || rec.SourceDeviceID == "" || rec.SourceEntityID == "") {
+			vstore.mu.Unlock()
+			return nil, badReqErr("mirror mode requires source_plugin_id, source_device_id, and source_entity_id")
+		}
+
+		if hasGroup {
+			if strings.TrimSpace(rec.Entity.Domain) == "" && strings.TrimSpace(rec.SourceDomain) == "" {
+				vstore.mu.Unlock()
+				return nil, badReqErr("domain is required for query-backed virtual entities")
+			}
+			if strings.TrimSpace(rec.Entity.Domain) == "" {
+				rec.Entity.Domain = strings.TrimSpace(rec.SourceDomain)
+			}
+			if rec.Entity.Labels == nil {
+				rec.Entity.Labels = map[string][]string{}
+			}
+			rec.Entity.Labels["virtual_source_query"] = []string{strings.TrimSpace(rec.SourceQuery)}
+		} else {
+			if rec.Entity.Labels != nil {
+				delete(rec.Entity.Labels, "virtual_source_query")
+			}
+			if source, err := findEntity(rec.SourcePluginID, rec.SourceDeviceID, rec.SourceEntityID); err == nil {
+				if rec.Entity.Domain == "" {
+					rec.Entity.Domain = source.Domain
+				}
+				if len(rec.Entity.Actions) == 0 && len(source.Actions) > 0 {
+					rec.Entity.Actions = append([]string(nil), source.Actions...)
+				}
+				rec.Entity.Data.SyncStatus = types.SyncStatusSynced
+			} else {
+				if rec.Entity.Domain == "" {
+					vstore.mu.Unlock()
+					return nil, badReqErr("domain is required when mirror source is unresolved")
+				}
+				rec.Entity.Data.SyncStatus = types.SyncStatusFailed
+			}
+		}
+
+		if input.Body.Actions != nil {
+			if len(input.Body.Actions) == 0 {
+				rec.Entity.Actions = defaultActionsForDomain(rec.Entity.Domain)
+			} else {
+				rec.Entity.Actions = append([]string(nil), input.Body.Actions...)
+			}
+		} else if len(rec.Entity.Actions) == 0 {
+			rec.Entity.Actions = defaultActionsForDomain(rec.Entity.Domain)
+		}
+
+		rec.Entity.ID = input.EntityID
+		rec.Entity.DeviceID = input.DeviceID
+		rec.Entity.Data.UpdatedAt = time.Now().UTC()
+		vstore.entities[key] = rec
+		masterRegistry.UpdateEntity(input.PluginID, rec.Entity)
+		vstore.persistLocked()
+		vstore.mu.Unlock()
+		return &VirtualEntityOutput{Body: rec.Entity}, nil
+	})
+}
+
+func defaultActionsForDomain(domain string) []string {
+	desc, ok := types.GetDomainDescriptor(domain)
+	if !ok || len(desc.Commands) == 0 {
+		return []string{"turn_on", "turn_off"}
+	}
+	actions := make([]string, 0, len(desc.Commands))
+	for _, cmd := range desc.Commands {
+		if cmd.Action == "" {
+			continue
+		}
+		actions = append(actions, cmd.Action)
+	}
+	if len(actions) == 0 {
+		return []string{"turn_on", "turn_off"}
+	}
+	sort.Strings(actions)
+	return actions
 }
 
 func registerScriptRoutes(api huma.API) {
@@ -939,6 +1319,9 @@ func registerScriptRoutes(api huma.API) {
 		params := map[string]string{"device_id": input.DeviceID, "entity_id": input.EntityID}
 		resp := routeRPC(input.PluginID, "scripts/get", params)
 		if resp.Error != nil {
+			if resp.Error.Code == -32004 || resp.Error.Code == -32005 {
+				return nil, notFoundErr(resp.Error.Message)
+			}
 			return nil, pluginErr(resp.Error.Message)
 		}
 		return &ScriptOutput{Body: resp.Result}, nil
@@ -987,6 +1370,9 @@ func registerScriptRoutes(api huma.API) {
 		params := map[string]string{"device_id": input.DeviceID, "entity_id": input.EntityID}
 		resp := routeRPC(input.PluginID, "scripts/state/get", params)
 		if resp.Error != nil {
+			if resp.Error.Code == -32005 || strings.Contains(strings.ToLower(resp.Error.Message), "not found") {
+				return nil, notFoundErr(resp.Error.Message)
+			}
 			return nil, pluginErr(resp.Error.Message)
 		}
 		return &ScriptStateOutput{Body: resp.Result}, nil
@@ -1117,58 +1503,22 @@ func registerCommandRoutes(api huma.API) {
 		pluginID, deviceID, entityID := input.PluginID, input.DeviceID, input.EntityID
 		payloadBytes, _ := json.Marshal(input.Body)
 		payload := json.RawMessage(payloadBytes)
-
-		key := entityKey(pluginID, deviceID, entityID)
-		vstore.mu.RLock()
-		vrec, isVirtual := vstore.entities[key]
-		vstore.mu.RUnlock()
-
-		if isVirtual {
-			actionType, err := parseActionType(payload)
-			if err != nil {
-				return nil, badReqErr(err.Error())
-			}
-			if len(vrec.Entity.Actions) > 0 && !containsAction(vrec.Entity.Actions, actionType) {
-				return nil, pluginErr(fmt.Sprintf("action %q not supported by this virtual entity", actionType))
-			}
-			params := map[string]any{"device_id": vrec.SourceDeviceID, "entity_id": vrec.SourceEntityID, "payload": payload}
-			sourceResp := routeRPC(vrec.SourcePluginID, "entities/commands/create", params)
-			if sourceResp.Error != nil {
-				return nil, pluginErr(sourceResp.Error.Message)
-			}
-			var sourceStatus types.CommandStatus
-			if err := json.Unmarshal(sourceResp.Result, &sourceStatus); err != nil {
-				return nil, pluginErr("invalid source command status")
-			}
-			now := time.Now().UTC()
-			virtualCID := nextID("vcmd")
-			status := types.CommandStatus{
-				CommandID: virtualCID, PluginID: pluginID, DeviceID: deviceID, EntityID: entityID,
-				EntityType: vrec.Entity.Domain, State: types.CommandPending, CreatedAt: now, LastUpdatedAt: now,
-			}
-			vstore.mu.Lock()
-			vstore.commands[virtualCID] = virtualCommandRecord{
-				OwnerPluginID: pluginID, SourcePluginID: vrec.SourcePluginID,
-				SourceCommand: sourceStatus.CommandID, VirtualKey: key, Status: status,
-			}
-			vrec.Entity.Data.LastCommandID = virtualCID
-			vrec.Entity.Data.SyncStatus = types.SyncStatusPending
-			vrec.Entity.Data.UpdatedAt = now
-			vstore.entities[key] = vrec
-			vstore.persistLocked()
-			vstore.mu.Unlock()
-			go monitorVirtualCommand(virtualCID)
+		status, err := sendCommandToAddress(pluginID, deviceID, entityID, payload)
+		if err == nil {
 			return &CommandStatusOutput{Body: status}, nil
 		}
 
-		params := map[string]any{"device_id": deviceID, "entity_id": entityID, "payload": payload}
-		resp := routeRPC(pluginID, "entities/commands/create", params)
-		if resp.Error != nil {
-			return nil, pluginErr(resp.Error.Message)
+		projected, hasProjection, perr := resolveProjectedEntity(pluginID, deviceID, entityID)
+		if perr == nil && hasProjection && projected.ID != "" {
+			status, err = sendCommandToAddress(projected.PluginID, projected.DeviceID, projected.ID, payload)
+			if err == nil {
+				return &CommandStatusOutput{Body: status}, nil
+			}
 		}
-		var status types.CommandStatus
-		json.Unmarshal(resp.Result, &status)
-		return &CommandStatusOutput{Body: status}, nil
+		if strings.Contains(err.Error(), "payload.type is required") {
+			return nil, badReqErr(err.Error())
+		}
+		return nil, pluginErr(err.Error())
 	})
 
 	huma.Register(api, huma.Operation{
@@ -1360,6 +1710,32 @@ func registerEventRoutes(api huma.API) {
 		}
 		return &EntityRatesOutput{Body: rates}, nil
 	})
+
+	huma.Register(api, huma.Operation{
+		OperationID: "trace-entity",
+		Method:      http.MethodGet,
+		Path:        "/api/plugins/{plugin_id}/devices/{device_id}/entities/{entity_id}/trace",
+		Summary:     "Trace entity events and commands",
+		Description: "Returns events and commands for an entity since a given timestamp, sorted chronologically. Poll with the timestamp of the last entry to get live activity without backfill.",
+		Tags:        []string{"events"},
+	}, func(ctx context.Context, input *TraceEntityInput) (*TraceOutput, error) {
+		if history == nil {
+			return nil, huma.Error500InternalServerError("History store not available")
+		}
+		since := time.Now().UTC()
+		if input.Since != "" {
+			if t, err := time.Parse(time.RFC3339Nano, input.Since); err == nil {
+				since = t
+			} else if t, err := time.Parse(time.RFC3339, input.Since); err == nil {
+				since = t
+			}
+		}
+		entries, err := history.TraceSince(input.PluginID, input.DeviceID, input.EntityID, since)
+		if err != nil {
+			return nil, huma.Error500InternalServerError("Failed to query entity trace")
+		}
+		return &TraceOutput{Body: entries}, nil
+	})
 }
 
 type entityWithPlugin struct {
@@ -1368,8 +1744,155 @@ type entityWithPlugin struct {
 }
 
 func performEntitySearch(query types.SearchQuery) []entityWithPlugin {
+	q := regsvc.Query{
+		Pattern:  query.Pattern,
+		Labels:   query.Labels,
+		PluginID: query.PluginID,
+		DeviceID: query.DeviceID,
+		EntityID: query.EntityID,
+		Domain:   query.Domain,
+		Limit:    query.Limit,
+	}
+	registryResults := masterRegistry.FindEntities(q)
+
+	results := make([]entityWithPlugin, 0, len(registryResults))
+	for _, r := range registryResults {
+		results = append(results, entityWithPlugin{
+			Entity:   r.Entity,
+			PluginID: r.PluginID,
+		})
+	}
+	return results
+}
+
+func startNATSDiscoveryBridge() {
+	log.Printf("gateway: starting NATS discovery bridge on subject %s", runner.SubjectGatewayDiscovery)
+	_, err := nc.Subscribe(runner.SubjectGatewayDiscovery, func(m *nats.Msg) {
+		queryStr := string(m.Data)
+		log.Printf("gateway: received discovery request: %s", queryStr)
+		// Extract query params from string like "?label=Room:Kitchen"
+		// We can reuse the http logic by creating a dummy request
+		u, err := url.Parse("http://localhost/api/search/entities" + queryStr)
+		if err != nil {
+			log.Printf("gateway: failed to parse discovery query %q: %v", queryStr, err)
+			return
+		}
+
+		q := u.Query()
+		pattern := q.Get("q")
+		if pattern == "" {
+			pattern = q.Get("pattern")
+		}
+		if pattern == "" {
+			pattern = "*"
+		}
+
+		limit, _ := strconv.Atoi(q.Get("limit"))
+
+		query := types.SearchQuery{
+			Pattern:  pattern,
+			Labels:   parseLabels(q["label"]),
+			PluginID: strings.TrimSpace(q.Get("plugin_id")),
+			DeviceID: strings.TrimSpace(q.Get("device_id")),
+			EntityID: strings.TrimSpace(q.Get("entity_id")),
+			Domain:   strings.TrimSpace(q.Get("domain")),
+			Limit:    limit,
+		}
+
+		results := performEntitySearch(query)
+		log.Printf("gateway: discovery query %q found %d matches", queryStr, len(results))
+		resp, _ := json.Marshal(results)
+		m.Respond(resp)
+	})
+	if err != nil {
+		log.Printf("gateway: failed to subscribe to discovery subject: %v", err)
+	}
+}
+
+func registerSearchRoutes(api huma.API) {
+	huma.Register(api, huma.Operation{
+		OperationID: "search-plugins",
+		Method:      http.MethodGet,
+		Path:        "/api/search/plugins",
+		Summary:     "Search plugins",
+		Description: "Broadcasts a search over NATS and collects plugin manifests from all responding plugins.",
+		Tags:        []string{"search"},
+	}, searchPluginsHandler)
+
+	huma.Register(api, huma.Operation{
+		OperationID: "search-devices",
+		Method:      http.MethodGet,
+		Path:        "/api/search/devices",
+		Summary:     "Search devices",
+		Description: "Broadcasts a device search over NATS and collects results from all plugins.",
+		Tags:        []string{"search"},
+	}, func(ctx context.Context, input *SearchDevicesInput) (*SearchDevicesOutput, error) {
+		pattern := input.Pattern
+		if pattern == "" {
+			pattern = "*"
+		}
+		var rawLabels []string
+		if iface, ok := ctx.(interface{ Gin() *gin.Context }); ok {
+			rawLabels = iface.Gin().QueryArray("label")
+		}
+		if len(rawLabels) == 0 {
+			rawLabels = input.Labels
+		}
+
+		q := regsvc.Query{
+			Pattern:  pattern,
+			Labels:   parseLabels(rawLabels),
+			PluginID: strings.TrimSpace(input.PluginID),
+			DeviceID: strings.TrimSpace(input.DeviceID),
+			Limit:    input.Limit,
+		}
+		results := masterRegistry.FindDevices(q)
+
+		return &SearchDevicesOutput{Body: results}, nil
+	})
+
+	huma.Register(api, huma.Operation{
+		OperationID: "search-entities",
+		Method:      http.MethodGet,
+		Path:        "/api/search/entities",
+		Summary:     "Search entities",
+		Description: "Broadcasts an entity search over NATS and collects results from all plugins.",
+		Tags:        []string{"search"},
+	}, func(ctx context.Context, input *SearchEntitiesInput) (*SearchEntitiesOutput, error) {
+		pattern := input.Pattern
+		if pattern == "" {
+			pattern = "*"
+		}
+		var rawLabels []string
+		if iface, ok := ctx.(interface{ Gin() *gin.Context }); ok {
+			rawLabels = iface.Gin().QueryArray("label")
+		}
+		if len(rawLabels) == 0 {
+			rawLabels = input.Labels
+		}
+
+		query := types.SearchQuery{
+			Pattern:  pattern,
+			Labels:   parseLabels(rawLabels),
+			PluginID: strings.TrimSpace(input.PluginID),
+			DeviceID: strings.TrimSpace(input.DeviceID),
+			EntityID: strings.TrimSpace(input.EntityID),
+			Domain:   strings.TrimSpace(input.Domain),
+			Limit:    input.Limit,
+		}
+		results := performEntitySearch(query)
+		return &SearchEntitiesOutput{Body: results}, nil
+	})
+}
+
+func searchPluginsHandler(ctx context.Context, input *SearchPluginsInput) (*SearchPluginsOutput, error) {
+	pattern := input.Pattern
+	if pattern == "" {
+		pattern = "*"
+	}
+	query := types.SearchQuery{Pattern: pattern}
 	data, _ := json.Marshal(query)
-	results := make([]entityWithPlugin, 0)
+	results := make([]types.Manifest, 0)
 
 	regMu.RLock()
 	expected := make(map[string]bool)
@@ -1381,7 +1904,7 @@ func performEntitySearch(query types.SearchQuery) []entityWithPlugin {
 	regMu.RUnlock()
 
 	sub, _ := nc.SubscribeSync(nats.NewInbox())
-	nc.PublishRequest(runner.SubjectSearchEntities, sub.Subject, data)
+	nc.PublishRequest(runner.SubjectSearchPlugins, sub.Subject, data)
 
 	timeout := time.After(300 * time.Millisecond)
 gatherLoop:
@@ -1397,234 +1920,20 @@ gatherLoop:
 				}
 				break gatherLoop
 			}
-			var res types.SearchEntitiesResponse
+			var res types.SearchPluginsResponse
 			if err := json.Unmarshal(msg.Data, &res); err == nil {
-				for _, ent := range res.Matches {
-					results = append(results, entityWithPlugin{
-						Entity:   ent,
-						PluginID: res.PluginID,
-					})
-				}
+				results = append(results, res.Matches...)
 				delete(expected, res.PluginID)
 			}
 		}
 	}
 	_ = sub.Unsubscribe()
 
-	if query.Limit > 0 && len(results) > query.Limit {
-		results = results[:query.Limit]
-	}
-	return results
+	return &SearchPluginsOutput{Body: results}, nil
 }
 
-func startNATSDiscoveryBridge() {
-		log.Printf("gateway: starting NATS discovery bridge on subject %s", runner.SubjectGatewayDiscovery)
-		_, err := nc.Subscribe(runner.SubjectGatewayDiscovery, func(m *nats.Msg) {
-			queryStr := string(m.Data)
-			log.Printf("gateway: received discovery request: %s", queryStr)
-			// Extract query params from string like "?label=Room:Kitchen"
-			// We can reuse the http logic by creating a dummy request
-			u, err := url.Parse("http://localhost/api/search/entities" + queryStr)
-			if err != nil {
-				log.Printf("gateway: failed to parse discovery query %q: %v", queryStr, err)
-				return
-			}
-	
-			q := u.Query()
-			pattern := q.Get("q")
-			if pattern == "" {
-				pattern = q.Get("pattern")
-			}
-			if pattern == "" {
-				pattern = "*"
-			}
-	
-			limit, _ := strconv.Atoi(q.Get("limit"))
-	
-			query := types.SearchQuery{
-				Pattern:  pattern,
-				Labels:   parseLabels(q["label"]),
-				PluginID: strings.TrimSpace(q.Get("plugin_id")),
-				DeviceID: strings.TrimSpace(q.Get("device_id")),
-				EntityID: strings.TrimSpace(q.Get("entity_id")),
-				Domain:   strings.TrimSpace(q.Get("domain")),
-				Limit:    limit,
-			}
-	
-			results := performEntitySearch(query)
-			log.Printf("gateway: discovery query %q found %d matches", queryStr, len(results))
-			resp, _ := json.Marshal(results)
-			m.Respond(resp)
-		})
-		if err != nil {
-			log.Printf("gateway: failed to subscribe to discovery subject: %v", err)
-		}
-	}
-	
-	func registerSearchRoutes(api huma.API) {
-		huma.Register(api, huma.Operation{
-			OperationID: "search-plugins",
-			Method:      http.MethodGet,
-			Path:        "/api/search/plugins",
-			Summary:     "Search plugins",
-			Description: "Broadcasts a search over NATS and collects plugin manifests from all responding plugins.",
-			Tags:        []string{"search"},
-		}, searchPluginsHandler)
-	
-		huma.Register(api, huma.Operation{
-			OperationID: "search-devices",
-			Method:      http.MethodGet,
-			Path:        "/api/search/devices",
-			Summary:     "Search devices",
-			Description: "Broadcasts a device search over NATS and collects results from all plugins.",
-			Tags:        []string{"search"},
-		}, func(ctx context.Context, input *SearchDevicesInput) (*SearchDevicesOutput, error) {
-			pattern := input.Pattern
-			if pattern == "" {
-				pattern = "*"
-			}
-			var rawLabels []string
-			if iface, ok := ctx.(interface{ Gin() *gin.Context }); ok {
-				rawLabels = iface.Gin().QueryArray("label")
-			}
-			if len(rawLabels) == 0 {
-				rawLabels = input.Labels
-			}
-	
-			query := types.SearchQuery{
-				Pattern:  pattern,
-				Labels:   parseLabels(rawLabels),
-				PluginID: strings.TrimSpace(input.PluginID),
-				DeviceID: strings.TrimSpace(input.DeviceID),
-				Limit:    input.Limit,
-			}
-			data, _ := json.Marshal(query)
-			results := make([]types.Device, 0)
-	
-			regMu.RLock()
-			expected := make(map[string]bool)
-			for id, rec := range registry {
-				if rec.Valid {
-					expected[id] = true
-				}
-			}
-			regMu.RUnlock()
-	
-			sub, _ := nc.SubscribeSync(nats.NewInbox())
-			nc.PublishRequest(runner.SubjectSearchDevices, sub.Subject, data)
-	
-			timeout := time.After(300 * time.Millisecond)
-		gatherLoop:
-			for len(expected) > 0 {
-				select {
-				case <-timeout:
-					break gatherLoop
-				default:
-					msg, err := sub.NextMsg(10 * time.Millisecond)
-					if err != nil {
-						if errors.Is(err, nats.ErrTimeout) {
-							continue
-						}
-						break gatherLoop
-					}
-					var res types.SearchDevicesResponse
-					if err := json.Unmarshal(msg.Data, &res); err == nil {
-						results = append(results, res.Matches...)
-						delete(expected, res.PluginID)
-					}
-				}
-			}
-			_ = sub.Unsubscribe()
-	
-			if query.Limit > 0 && len(results) > query.Limit {
-				results = results[:query.Limit]
-			}
-			return &SearchDevicesOutput{Body: results}, nil
-		})
-	
-		huma.Register(api, huma.Operation{
-			OperationID: "search-entities",
-			Method:      http.MethodGet,
-			Path:        "/api/search/entities",
-			Summary:     "Search entities",
-			Description: "Broadcasts an entity search over NATS and collects results from all plugins.",
-			Tags:        []string{"search"},
-		}, func(ctx context.Context, input *SearchEntitiesInput) (*SearchEntitiesOutput, error) {
-			pattern := input.Pattern
-			if pattern == "" {
-				pattern = "*"
-			}
-			var rawLabels []string
-			if iface, ok := ctx.(interface{ Gin() *gin.Context }); ok {
-				rawLabels = iface.Gin().QueryArray("label")
-			}
-			if len(rawLabels) == 0 {
-				rawLabels = input.Labels
-			}
-	
-			query := types.SearchQuery{
-				Pattern:  pattern,
-				Labels:   parseLabels(rawLabels),
-				PluginID: strings.TrimSpace(input.PluginID),
-				DeviceID: strings.TrimSpace(input.DeviceID),
-				EntityID: strings.TrimSpace(input.EntityID),
-				Domain:   strings.TrimSpace(input.Domain),
-				Limit:    input.Limit,
-			}
-			results := performEntitySearch(query)
-			return &SearchEntitiesOutput{Body: results}, nil
-		})
-	}
-	
-	func searchPluginsHandler(ctx context.Context, input *SearchPluginsInput) (*SearchPluginsOutput, error) {
-		pattern := input.Pattern
-		if pattern == "" {
-			pattern = "*"
-		}
-		query := types.SearchQuery{Pattern: pattern}
-		data, _ := json.Marshal(query)
-		results := make([]types.Manifest, 0)
-	
-		regMu.RLock()
-		expected := make(map[string]bool)
-		for id, rec := range registry {
-			if rec.Valid {
-				expected[id] = true
-			}
-		}
-		regMu.RUnlock()
-	
-		sub, _ := nc.SubscribeSync(nats.NewInbox())
-		nc.PublishRequest(runner.SubjectSearchPlugins, sub.Subject, data)
-	
-		timeout := time.After(300 * time.Millisecond)
-	gatherLoop:
-		for len(expected) > 0 {
-			select {
-			case <-timeout:
-				break gatherLoop
-			default:
-				msg, err := sub.NextMsg(10 * time.Millisecond)
-				if err != nil {
-					if errors.Is(err, nats.ErrTimeout) {
-						continue
-					}
-					break gatherLoop
-				}
-				var res types.SearchPluginsResponse
-				if err := json.Unmarshal(msg.Data, &res); err == nil {
-					results = append(results, res.Matches...)
-					delete(expected, res.PluginID)
-				}
-			}
-		}
-		_ = sub.Unsubscribe()
+func registerSchemaRoutes(api huma.API) {
 
-		return &SearchPluginsOutput{Body: results}, nil
-	}
-	
-	func registerSchemaRoutes(api huma.API) {
-	
 	huma.Register(api, huma.Operation{
 		OperationID: "list-domains",
 		Method:      http.MethodGet,

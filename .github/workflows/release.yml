@@ -47,6 +47,7 @@ jobs:
           GOPROXY: direct
         run: |
           grep -E '^	' go.mod | grep 'github.com/slidebolt/sdk' | awk '{print $1"@latest"}' | xargs -r go get
+          go get github.com/slidebolt/registry@latest
           go mod tidy
 
 
