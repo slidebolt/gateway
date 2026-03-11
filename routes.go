@@ -6,7 +6,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"io/fs"
 	"log"
@@ -1679,17 +1678,24 @@ func registerCommandRoutes(api huma.API) {
 		pluginID, deviceID, entityID := input.PluginID, input.DeviceID, input.EntityID
 		payloadBytes, _ := json.Marshal(input.Body)
 		payload := json.RawMessage(payloadBytes)
-		status, err := sendCommandToAddress(pluginID, deviceID, entityID, payload)
-		if err == nil {
-			return &CommandStatusOutput{Body: status}, nil
-		}
-
 		projected, hasProjection, perr := resolveProjectedEntity(pluginID, deviceID, entityID)
-		if perr == nil && hasProjection && projected.ID != "" {
-			status, err = sendCommandToAddress(projected.PluginID, projected.DeviceID, projected.ID, payload)
+		if perr == nil && hasProjection {
+			if projected.ID == "" {
+				return nil, notFoundErr("entity not found")
+			}
+			status, err := sendCommandToAddress(projected.PluginID, projected.DeviceID, projected.ID, payload)
 			if err == nil {
 				return &CommandStatusOutput{Body: status}, nil
 			}
+			if strings.Contains(err.Error(), "payload.type is required") {
+				return nil, badReqErr(err.Error())
+			}
+			return nil, pluginErr(err.Error())
+		}
+
+		status, err := sendCommandToAddress(pluginID, deviceID, entityID, payload)
+		if err == nil {
+			return &CommandStatusOutput{Body: status}, nil
 		}
 		if strings.Contains(err.Error(), "payload.type is required") {
 			return nil, badReqErr(err.Error())
