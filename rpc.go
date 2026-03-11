@@ -27,7 +27,9 @@ func routeRPC(pluginID, method string, params any) types.Response {
 		return types.Response{JSONRPC: types.JSONRPCVersion, Error: &types.RPCError{Code: -32000, Message: "plugin timeout"}}
 	}
 	var resp types.Response
-	json.Unmarshal(msg.Data, &resp)
+	if err := json.Unmarshal(msg.Data, &resp); err != nil {
+		return types.Response{JSONRPC: types.JSONRPCVersion, Error: &types.RPCError{Code: -32700, Message: "malformed response from plugin"}}
+	}
 	return resp
 }
 
@@ -40,6 +42,17 @@ func parseEntities(resp types.Response) ([]types.Entity, error) {
 		return nil, err
 	}
 	return entities, nil
+}
+
+func parseDevices(resp types.Response) ([]types.Device, error) {
+	if resp.Error != nil {
+		return nil, errors.New(resp.Error.Message)
+	}
+	var devices []types.Device
+	if err := json.Unmarshal(resp.Result, &devices); err != nil {
+		return nil, err
+	}
+	return devices, nil
 }
 
 func findEntity(pluginID, deviceID, entityID string) (types.Entity, error) {
@@ -56,6 +69,20 @@ func findEntity(pluginID, deviceID, entityID string) (types.Entity, error) {
 	return types.Entity{}, fmt.Errorf("entity not found")
 }
 
+func findDevice(pluginID, deviceID string) (types.Device, error) {
+	resp := routeRPC(pluginID, "devices/list", nil)
+	devices, err := parseDevices(resp)
+	if err != nil {
+		return types.Device{}, err
+	}
+	for _, d := range devices {
+		if d.ID == deviceID {
+			return d, nil
+		}
+	}
+	return types.Device{}, fmt.Errorf("device not found")
+}
+
 func fetchCommandStatus(pluginID, commandID string) (types.CommandStatus, error) {
 	resp := routeRPC(pluginID, "commands/status/get", gin.H{"command_id": commandID})
 	if resp.Error != nil {
@@ -66,6 +93,16 @@ func fetchCommandStatus(pluginID, commandID string) (types.CommandStatus, error)
 		return types.CommandStatus{}, err
 	}
 	return st, nil
+}
+
+func fetchAnyCommandStatus(pluginID, commandID string) (types.CommandStatus, error) {
+	vstore.mu.RLock()
+	if rec, ok := vstore.commands[commandID]; ok {
+		vstore.mu.RUnlock()
+		return rec.Status, nil
+	}
+	vstore.mu.RUnlock()
+	return fetchCommandStatus(pluginID, commandID)
 }
 
 func parseActionType(payload json.RawMessage) (string, error) {

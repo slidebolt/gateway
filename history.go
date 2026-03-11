@@ -59,6 +59,12 @@ func openHistoryStore(path string) (*historyStore, error) {
 	if err != nil {
 		return nil, err
 	}
+	// SQLite connection-level PRAGMAs (busy_timeout, journal mode) are not
+	// consistently applied across a pool of multiple connections.
+	// Keep a single shared connection to avoid transient lock/drop behavior
+	// under concurrent readers/writers.
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
 	if _, err := db.Exec("PRAGMA journal_mode=WAL;"); err != nil {
 		_ = db.Close()
 		return nil, err
@@ -106,6 +112,19 @@ func openHistoryStore(path string) (*historyStore, error) {
 			return nil, err
 		}
 	}
+	migrations := []string{
+		// Migrations: add columns if not present (idempotent — SQLite ignores duplicate column errors).
+		`ALTER TABLE history_events ADD COLUMN payload_json TEXT`,
+		`ALTER TABLE history_events ADD COLUMN entity_type TEXT NOT NULL DEFAULT ''`,
+		// Stores the original command payload (body sent by the caller) keyed by command_id.
+		`CREATE TABLE IF NOT EXISTS history_command_payloads (
+			command_id   TEXT PRIMARY KEY,
+			payload_json TEXT NOT NULL
+		)`,
+	}
+	for _, stmt := range migrations {
+		_, _ = db.Exec(stmt)
+	}
 
 	return &historyStore{db: db}, nil
 }
@@ -121,17 +140,23 @@ func (h *historyStore) InsertEvent(streamSeq uint64, ts time.Time, env types.Ent
 	if h == nil {
 		return nil
 	}
+	payloadStr := ""
+	if len(env.Payload) > 0 {
+		payloadStr = string(env.Payload)
+	}
 	_, err := h.db.Exec(
 		`INSERT OR IGNORE INTO history_events
-		(stream_seq, name, plugin_id, device_id, entity_id, event_id, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		(stream_seq, name, plugin_id, device_id, entity_id, entity_type, event_id, created_at, payload_json)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		streamSeq,
 		classifyEventName(env.EntityType, env.Payload, false),
 		env.PluginID,
 		env.DeviceID,
 		env.EntityID,
+		env.EntityType,
 		env.EventID,
 		ts.UTC().Format(time.RFC3339Nano),
+		payloadStr,
 	)
 	return err
 }
@@ -157,6 +182,19 @@ func (h *historyStore) InsertCommandStatus(streamSeq uint64, status types.Comman
 		status.CreatedAt.UTC().Format(time.RFC3339Nano),
 		status.LastUpdatedAt.UTC().Format(time.RFC3339Nano),
 		string(raw),
+	)
+	return err
+}
+
+// StoreCommandPayload records the original command body for a given command_id.
+// Called at dispatch time so TraceSince can show the real Payload.type.
+func (h *historyStore) StoreCommandPayload(commandID string, payload json.RawMessage) error {
+	if h == nil || len(payload) == 0 {
+		return nil
+	}
+	_, err := h.db.Exec(
+		`INSERT OR IGNORE INTO history_command_payloads (command_id, payload_json) VALUES (?, ?)`,
+		commandID, string(payload),
 	)
 	return err
 }
@@ -282,10 +320,9 @@ func (h *historyStore) PluginRates(windowSeconds int) ([]pluginRate, error) {
 	eventRows.Close()
 
 	commandRows, err := h.db.Query(
-		`SELECT plugin_id, COUNT(1)
+		`SELECT plugin_id, COUNT(DISTINCT command_id)
 		 FROM history_command_status
 		 WHERE created_at >= ?
-		   AND state = 'pending'
 		 GROUP BY plugin_id`,
 		cutoff,
 	)
@@ -371,10 +408,9 @@ func (h *historyStore) DeviceRates(pluginID string, windowSeconds int) ([]device
 	eventRows.Close()
 
 	commandRows, err := h.db.Query(
-		`SELECT plugin_id, device_id, COUNT(1)
+		`SELECT plugin_id, device_id, COUNT(DISTINCT command_id)
 		 FROM history_command_status
 		 WHERE created_at >= ?
-		   AND state = 'pending'
 		   AND (? = '' OR plugin_id = ?)
 		 GROUP BY plugin_id, device_id`,
 		cutoff, pluginID, pluginID,
@@ -467,10 +503,9 @@ func (h *historyStore) EntityRates(pluginID, deviceID string, windowSeconds int)
 	eventRows.Close()
 
 	commandRows, err := h.db.Query(
-		`SELECT plugin_id, device_id, entity_id, COUNT(1)
+		`SELECT plugin_id, device_id, entity_id, COUNT(DISTINCT command_id)
 		 FROM history_command_status
 		 WHERE created_at >= ?
-		   AND state = 'pending'
 		   AND (? = '' OR plugin_id = ?)
 		   AND (? = '' OR device_id = ?)
 		 GROUP BY plugin_id, device_id, entity_id`,
@@ -520,4 +555,136 @@ func (h *historyStore) EntityRates(pluginID, deviceID string, windowSeconds int)
 		return out[i].TotalPerSec > out[j].TotalPerSec
 	})
 	return out, nil
+}
+
+// traceEntry is a unified event-or-command record returned by TraceSince.
+// Name is EventRef.Type for events and Payload.type for commands — the exact
+// strings needed to write Ctx:OnEvent / Ctx:SendCommand in Lua.
+// EventKey is the Ctx:OnEvent subscription key: "{plugin_id}.{device_id}.{entity_id}".
+type traceEntry struct {
+	Kind     string          `json:"kind"`               // "event" or "command"
+	Ts       time.Time       `json:"ts"`
+	Name     string          `json:"name"`               // EventRef.Type / Payload.type
+	EventKey string          `json:"event_key,omitempty"` // Ctx:OnEvent key (events only)
+	State    string          `json:"state,omitempty"`    // command state
+	Error    string          `json:"error,omitempty"`    // command error
+	Data     json.RawMessage `json:"data,omitempty"`
+}
+
+// TraceSince returns events and commands for the given entity that occurred
+// strictly after since, sorted chronologically. For commands, only the latest
+// state per command_id is returned.
+func (h *historyStore) TraceSince(pluginID, deviceID, entityID string, since time.Time) ([]traceEntry, error) {
+	if h == nil {
+		return []traceEntry{}, nil
+	}
+	sinceStr := since.UTC().Format(time.RFC3339Nano)
+
+	var entries []traceEntry
+
+	eventKey := pluginID + "." + deviceID + "." + entityID
+
+	// ── Events ──────────────────────────────────────────────────────────────────
+	eventRows, err := h.db.Query(
+		`SELECT created_at, COALESCE(payload_json, '')
+		 FROM history_events
+		 WHERE plugin_id = ? AND device_id = ? AND entity_id = ?
+		   AND created_at > ?
+		 ORDER BY created_at ASC, id ASC
+		 LIMIT 500`,
+		pluginID, deviceID, entityID, sinceStr,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer eventRows.Close()
+
+	for eventRows.Next() {
+		var createdAt, payload string
+		if err := eventRows.Scan(&createdAt, &payload); err != nil {
+			return nil, err
+		}
+		t, _ := time.Parse(time.RFC3339Nano, createdAt)
+		// Name = EventRef.Type (the payload "type" field — exactly what Lua sees).
+		name := ""
+		if payload != "" {
+			var p struct {
+				Type string `json:"type"`
+			}
+			if json.Unmarshal([]byte(payload), &p) == nil {
+				name = p.Type
+			}
+		}
+		e := traceEntry{Kind: "event", Ts: t.UTC(), Name: name, EventKey: eventKey}
+		if payload != "" {
+			e.Data = json.RawMessage(payload)
+		}
+		entries = append(entries, e)
+	}
+	if err := eventRows.Err(); err != nil {
+		return nil, err
+	}
+
+	// ── Commands ─────────────────────────────────────────────────────────────────
+	// One row per command_id (latest state), joined with the original command payload.
+	cmdRows, err := h.db.Query(
+		`SELECT hcs.payload_json, hcs.created_at, COALESCE(hcp.payload_json, '')
+		 FROM history_command_status hcs
+		 LEFT JOIN history_command_payloads hcp ON hcs.command_id = hcp.command_id
+		 WHERE hcs.plugin_id = ? AND hcs.device_id = ? AND hcs.entity_id = ?
+		   AND hcs.created_at > ?
+		 GROUP BY hcs.command_id
+		 HAVING hcs.stream_seq = MAX(hcs.stream_seq)
+		 ORDER BY hcs.created_at ASC`,
+		pluginID, deviceID, entityID, sinceStr,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer cmdRows.Close()
+
+	for cmdRows.Next() {
+		var statusJSON, createdAt, cmdPayload string
+		if err := cmdRows.Scan(&statusJSON, &createdAt, &cmdPayload); err != nil {
+			return nil, err
+		}
+		t, _ := time.Parse(time.RFC3339Nano, createdAt)
+		var status types.CommandStatus
+		if err := json.Unmarshal([]byte(statusJSON), &status); err != nil {
+			continue
+		}
+		// Name = Payload.type from the original command body (what Lua passes to SendCommand).
+		name := ""
+		if cmdPayload != "" {
+			var p struct {
+				Type string `json:"type"`
+			}
+			if json.Unmarshal([]byte(cmdPayload), &p) == nil {
+				name = p.Type
+			}
+		}
+		e := traceEntry{
+			Kind:  "command",
+			Ts:    t.UTC(),
+			Name:  name,
+			State: string(status.State),
+			Error: status.Error,
+		}
+		if cmdPayload != "" {
+			e.Data = json.RawMessage(cmdPayload)
+		}
+		entries = append(entries, e)
+	}
+	if err := cmdRows.Err(); err != nil {
+		return nil, err
+	}
+
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].Ts.Before(entries[j].Ts)
+	})
+
+	if entries == nil {
+		return []traceEntry{}, nil
+	}
+	return entries, nil
 }
