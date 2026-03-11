@@ -1,12 +1,21 @@
 package main
 
 import (
+	"archive/tar"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"io/fs"
 	"log"
 	"net/http"
+	"net/url"
+	"os"
+	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -45,6 +54,15 @@ type HealthOutput struct{ Body map[string]any }
 type RuntimeOutput struct{ Body gatewayRuntimeInfo }
 type HistoryStatsOutput struct{ Body historyStats }
 
+type BackupInput struct{}
+type PruneInput struct{}
+
+type PruneOutput struct {
+	Body struct {
+		Message string `json:"message"`
+	}
+}
+
 type ListPluginsOutput struct{ Body map[string]types.Registration }
 
 // --- Devices ---
@@ -56,6 +74,14 @@ type ListDevicesOutput struct{ Body []types.Device }
 
 type RefreshDevicesInput struct {
 	PluginID string `path:"plugin_id" doc:"Plugin ID"`
+}
+type FlushPluginStorageInput struct {
+	PluginID string `path:"plugin_id" doc:"Plugin ID"`
+}
+type FlushPluginStorageOutput struct {
+	Body struct {
+		OK bool `json:"ok"`
+	}
 }
 
 type GetPluginLogLevelInput struct {
@@ -431,6 +457,131 @@ func registerSystemRoutes(api huma.API) {
 		}
 		return &ListPluginsOutput{Body: out}, nil
 	})
+
+	huma.Register(api, huma.Operation{
+		OperationID: "system-backup",
+		Method:      http.MethodGet,
+		Path:        "/api/system/backup",
+		Summary:     "System Backup (tar.gz)",
+		Description: "Streams a tar.gz archive of the system configuration and state. Excludes logs, history database, and NATS binary storage.",
+		Tags:        []string{"system"},
+		Responses: map[string]*huma.Response{
+			"200": {
+				Description: "Backup archive",
+				Content: map[string]*huma.MediaType{
+					"application/gzip": {
+						Schema: &huma.Schema{
+							Type:   "string",
+							Format: "binary",
+						},
+					},
+				},
+			},
+		},
+	}, func(ctx context.Context, input *BackupInput) (*huma.StreamResponse, error) {
+		return &huma.StreamResponse{
+			Body: func(ctx huma.Context) {
+				gwDataDir := vstore.dataDir
+				rootDataDir := filepath.Dir(gwDataDir)
+
+				ctx.SetHeader("Content-Type", "application/gzip")
+				ctx.SetHeader("Content-Disposition", "attachment; filename=\"slidebolt-backup-"+time.Now().Format("20060102-150405")+".tar.gz\"")
+
+				gzw := gzip.NewWriter(ctx.BodyWriter())
+				defer gzw.Close()
+				tw := tar.NewWriter(gzw)
+				defer tw.Close()
+
+				_ = filepath.WalkDir(rootDataDir, func(path string, d fs.DirEntry, err error) error {
+					if err != nil {
+						return err
+					}
+					rel, err := filepath.Rel(rootDataDir, path)
+					if err != nil {
+						return err
+					}
+					if rel == "." {
+						return nil
+					}
+
+					if d.IsDir() {
+						if d.Name() == "nats" {
+							return filepath.SkipDir
+						}
+						return nil
+					}
+
+					ext := strings.ToLower(filepath.Ext(path))
+					if ext != ".json" && ext != ".lua" {
+						return nil
+					}
+					if d.Name() == "runtime.json" {
+						return nil
+					}
+
+					info, err := d.Info()
+					if err != nil {
+						return nil
+					}
+					header, err := tar.FileInfoHeader(info, "")
+					if err != nil {
+						return err
+					}
+					header.Name = rel
+
+					if err := tw.WriteHeader(header); err != nil {
+						return err
+					}
+					f, err := os.Open(path)
+					if err != nil {
+						return nil
+					}
+					defer f.Close()
+					_, err = io.Copy(tw, f)
+					return err
+				})
+			},
+		}, nil
+	})
+
+	huma.Register(api, huma.Operation{
+		OperationID: "system-prune",
+		Method:      http.MethodPost,
+		Path:        "/api/system/prune",
+		Summary:     "System Prune (Clean Everything)",
+		Description: "Wipes the event/command history database, clears NATS JetStream messages, and truncates all service log files.",
+		Tags:        []string{"system"},
+	}, func(ctx context.Context, input *PruneInput) (*PruneOutput, error) {
+		if history != nil {
+			if err := history.Prune(); err != nil {
+				log.Printf("Prune: history failed: %v", err)
+			}
+		}
+
+		if js != nil {
+			_ = js.PurgeStream("EVENTS")
+			_ = js.PurgeStream("COMMANDS")
+		}
+
+		rootDataDir := filepath.Dir(vstore.dataDir)
+		logDir := filepath.Join(filepath.Dir(rootDataDir), "logs")
+		if entries, err := os.ReadDir(logDir); err == nil {
+			for _, entry := range entries {
+				if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".log") {
+					_ = os.Truncate(filepath.Join(logDir, entry.Name()), 0)
+				}
+			}
+		}
+
+		vstore.mu.Lock()
+		vstore.commands = make(map[string]virtualCommandRecord)
+		vstore.persistLocked()
+		vstore.mu.Unlock()
+
+		res := &PruneOutput{}
+		res.Body.Message = "History, NATS streams, and logs have been cleared."
+		return res, nil
+	})
 }
 
 func registerDeviceRoutes(api huma.API) {
@@ -466,6 +617,23 @@ func registerDeviceRoutes(api huma.API) {
 		var devices []types.Device
 		json.Unmarshal(resp.Result, &devices)
 		return &ListDevicesOutput{Body: devices}, nil
+	})
+
+	huma.Register(api, huma.Operation{
+		OperationID: "flush-plugin-storage",
+		Method:      http.MethodPost,
+		Path:        "/api/plugins/{plugin_id}/storage/flush",
+		Summary:     "Flush plugin storage to disk",
+		Description: "Forces the plugin runner to persist its in-memory canonical state to disk immediately.",
+		Tags:        []string{"plugins"},
+	}, func(ctx context.Context, input *FlushPluginStorageInput) (*FlushPluginStorageOutput, error) {
+		resp := routeRPC(input.PluginID, "storage/flush", nil)
+		if resp.Error != nil {
+			return nil, pluginErr(resp.Error.Message)
+		}
+		out := FlushPluginStorageOutput{}
+		out.Body.OK = true
+		return &out, nil
 	})
 
 	huma.Register(api, huma.Operation{
@@ -526,6 +694,10 @@ func registerDeviceRoutes(api huma.API) {
 		if resp.Error != nil {
 			return nil, pluginErr(resp.Error.Message)
 		}
+		updateMasterDeviceFromResult(input.PluginID, resp.Result, input.Body)
+		if strings.TrimSpace(input.Body.EntityQuery) != "" {
+			hasProjectionDevices.Store(true)
+		}
 		return &DeviceOutput{Body: resp.Result}, nil
 	})
 
@@ -540,6 +712,10 @@ func registerDeviceRoutes(api huma.API) {
 		resp := routeRPC(input.PluginID, "devices/update", input.Body)
 		if resp.Error != nil {
 			return nil, pluginErr(resp.Error.Message)
+		}
+		updateMasterDeviceFromResult(input.PluginID, resp.Result, input.Body)
+		if strings.TrimSpace(input.Body.EntityQuery) != "" {
+			hasProjectionDevices.Store(true)
 		}
 		broker.broadcast(sseMessage{Type: "device", PluginID: input.PluginID, DeviceID: input.Body.ID})
 		return &DeviceOutput{Body: resp.Result}, nil
@@ -562,6 +738,7 @@ func registerDeviceRoutes(api huma.API) {
 		if resp.Error != nil {
 			return nil, pluginErr(resp.Error.Message)
 		}
+		updateMasterDeviceFromResult(input.PluginID, resp.Result, payload)
 		broker.broadcast(sseMessage{Type: "device", PluginID: input.PluginID, DeviceID: input.DeviceID})
 		return &DeviceOutput{Body: resp.Result}, nil
 	})
@@ -582,6 +759,7 @@ func registerDeviceRoutes(api huma.API) {
 		if resp.Error != nil {
 			return nil, pluginErr(resp.Error.Message)
 		}
+		updateMasterDeviceFromResult(input.PluginID, resp.Result, payload)
 		broker.broadcast(sseMessage{Type: "device", PluginID: input.PluginID, DeviceID: input.DeviceID})
 		return &DeviceOutput{Body: resp.Result}, nil
 	})
@@ -598,6 +776,7 @@ func registerDeviceRoutes(api huma.API) {
 		if resp.Error != nil {
 			return nil, pluginErr(resp.Error.Message)
 		}
+		masterRegistry.DeleteDevice(input.PluginID, input.DeviceID)
 		return &DeleteOutput{Body: resp.Result}, nil
 	})
 
@@ -679,6 +858,7 @@ func registerEntityRoutes(api huma.API) {
 		if resp.Error != nil {
 			return nil, pluginErr(resp.Error.Message)
 		}
+		updateMasterEntityFromResult(input.PluginID, input.DeviceID, resp.Result, input.Body)
 		return &EntityOutput{Body: resp.Result}, nil
 	})
 
@@ -695,6 +875,7 @@ func registerEntityRoutes(api huma.API) {
 		if resp.Error != nil {
 			return nil, pluginErr(resp.Error.Message)
 		}
+		updateMasterEntityFromResult(input.PluginID, input.DeviceID, resp.Result, input.Body)
 		return &EntityOutput{Body: resp.Result}, nil
 	})
 
@@ -715,6 +896,7 @@ func registerEntityRoutes(api huma.API) {
 		if resp.Error != nil {
 			return nil, pluginErr(resp.Error.Message)
 		}
+		updateMasterEntityFromResult(input.PluginID, input.DeviceID, resp.Result, payload)
 		broker.broadcast(sseMessage{Type: "entity", PluginID: input.PluginID, DeviceID: input.DeviceID, EntityID: input.EntityID})
 		return &EntityOutput{Body: resp.Result}, nil
 	})
@@ -735,6 +917,7 @@ func registerEntityRoutes(api huma.API) {
 		if resp.Error != nil {
 			return nil, pluginErr(resp.Error.Message)
 		}
+		updateMasterEntityFromResult(input.PluginID, input.DeviceID, resp.Result, payload)
 		broker.broadcast(sseMessage{Type: "entity", PluginID: input.PluginID, DeviceID: input.DeviceID, EntityID: input.EntityID})
 		return &EntityOutput{Body: resp.Result}, nil
 	})
@@ -752,6 +935,7 @@ func registerEntityRoutes(api huma.API) {
 		if resp.Error != nil {
 			return nil, pluginErr(resp.Error.Message)
 		}
+		masterRegistry.DeleteEntity(input.PluginID, input.DeviceID, input.EntityID)
 		return &DeleteOutput{Body: resp.Result}, nil
 	})
 
@@ -1567,4 +1751,44 @@ func parseLabels(pairs []string) map[string][]string {
 		}
 	}
 	return labels
+}
+
+func updateMasterDeviceFromResult(pluginID string, raw json.RawMessage, fallback types.Device) {
+	if masterRegistry == nil {
+		return
+	}
+	var dev types.Device
+	if len(raw) > 0 && json.Unmarshal(raw, &dev) == nil && strings.TrimSpace(dev.ID) != "" {
+		masterRegistry.UpdateDevice(pluginID, dev)
+		return
+	}
+	if strings.TrimSpace(fallback.ID) != "" {
+		masterRegistry.UpdateDevice(pluginID, fallback)
+	}
+}
+
+func updateMasterEntityFromResult(pluginID, fallbackDeviceID string, raw json.RawMessage, fallback types.Entity) {
+	if masterRegistry == nil {
+		return
+	}
+	var ent types.Entity
+	if len(raw) > 0 && json.Unmarshal(raw, &ent) == nil && strings.TrimSpace(ent.ID) != "" {
+		if strings.TrimSpace(ent.DeviceID) == "" {
+			ent.DeviceID = fallbackDeviceID
+		}
+		if strings.TrimSpace(ent.DeviceID) != "" {
+			masterRegistry.UpdateEntity(pluginID, ent)
+			return
+		}
+	}
+	if strings.TrimSpace(fallback.ID) == "" {
+		return
+	}
+	if strings.TrimSpace(fallback.DeviceID) == "" {
+		fallback.DeviceID = fallbackDeviceID
+	}
+	if strings.TrimSpace(fallback.DeviceID) == "" {
+		return
+	}
+	masterRegistry.UpdateEntity(pluginID, fallback)
 }

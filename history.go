@@ -231,6 +231,20 @@ func (h *historyStore) Stats() (historyStats, error) {
 	return stats, nil
 }
 
+func (h *historyStore) Prune() error {
+	if h == nil || h.db == nil {
+		return nil
+	}
+	tables := []string{"history_events", "history_command_status", "history_command_payloads"}
+	for _, table := range tables {
+		if _, err := h.db.Exec(fmt.Sprintf("DELETE FROM %s", table)); err != nil {
+			return fmt.Errorf("prune %s: %w", table, err)
+		}
+	}
+	_, err := h.db.Exec("VACUUM")
+	return err
+}
+
 func (h *historyStore) PluginRates(windowSeconds int) ([]pluginRate, error) {
 	if windowSeconds <= 0 {
 		windowSeconds = 30
