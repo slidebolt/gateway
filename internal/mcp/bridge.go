@@ -1,8 +1,7 @@
-package main
-
-// MCPBridge generates MCP tools automatically from the huma OpenAPI spec.
-// Every REST route is available as an MCP tool — no per-route MCP code needed.
-// When a new route is added to routes.go, it appears in MCP automatically.
+// Package mcp provides an MCP bridge that auto-generates tools from the
+// gateway's OpenAPI spec, so every REST route is available as an MCP tool
+// without per-route MCP code.
+package mcp
 
 import (
 	"bytes"
@@ -16,32 +15,33 @@ import (
 	"strings"
 
 	"github.com/danielgtaylor/huma/v2"
-	"github.com/mark3labs/mcp-go/mcp"
+	mcplib "github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 )
 
-type MCPBridge struct {
+// Bridge wraps an MCP server and proxies tool calls to the REST API.
+type Bridge struct {
 	mcpServer *server.MCPServer
 }
 
-func NewMCPBridge(api huma.API, baseURL string) *MCPBridge {
+// New creates a Bridge populated with one MCP tool per OpenAPI operation.
+func New(api huma.API, baseURL string) *Bridge {
 	s := server.NewMCPServer("SlideBolt Gateway", "1.1.0",
 		server.WithToolCapabilities(true),
 	)
-	b := &MCPBridge{mcpServer: s}
+	b := &Bridge{mcpServer: s}
 	b.buildFromOpenAPI(api, baseURL)
 	return b
 }
 
-func (b *MCPBridge) Serve() {
+// Serve runs the MCP server over stdio (blocks until the process exits).
+func (b *Bridge) Serve() {
 	if err := server.ServeStdio(b.mcpServer); err != nil {
 		log.Printf("MCP Server error: %v", err)
 	}
 }
 
-// buildFromOpenAPI walks the huma OpenAPI spec and registers one MCP tool per
-// operation. The tool handler proxies the call to the REST API over HTTP.
-func (b *MCPBridge) buildFromOpenAPI(api huma.API, baseURL string) {
+func (b *Bridge) buildFromOpenAPI(api huma.API, baseURL string) {
 	oapi := api.OpenAPI()
 	if oapi == nil {
 		return
@@ -69,7 +69,7 @@ func (b *MCPBridge) buildFromOpenAPI(api huma.API, baseURL string) {
 	}
 }
 
-func (b *MCPBridge) registerTool(method, path string, op *huma.Operation, baseURL string) {
+func (b *Bridge) registerTool(method, path string, op *huma.Operation, baseURL string) {
 	name := op.OperationID
 	if name == "" {
 		name = strings.ToLower(method) + "_" + pathToToolName(path)
@@ -80,36 +80,35 @@ func (b *MCPBridge) registerTool(method, path string, op *huma.Operation, baseUR
 		desc += "\n\n" + op.Description
 	}
 
-	var opts []mcp.ToolOption
-	opts = append(opts, mcp.WithDescription(desc))
+	var opts []mcplib.ToolOption
+	opts = append(opts, mcplib.WithDescription(desc))
 
 	for _, param := range op.Parameters {
 		if param.In == "path" || param.In == "query" || param.In == "header" {
-			pOpts := []mcp.PropertyOption{mcp.Description(param.Description)}
-			opts = append(opts, mcp.WithString(param.Name, pOpts...))
+			pOpts := []mcplib.PropertyOption{mcplib.Description(param.Description)}
+			opts = append(opts, mcplib.WithString(param.Name, pOpts...))
 		}
 	}
 
 	if op.RequestBody != nil {
-		opts = append(opts, mcp.WithObject("body",
-			mcp.Description("Request body as a JSON object"),
+		opts = append(opts, mcplib.WithObject("body",
+			mcplib.Description("Request body as a JSON object"),
 		))
 	}
 
 	b.mcpServer.AddTool(
-		mcp.NewTool(name, opts...),
+		mcplib.NewTool(name, opts...),
 		makeHTTPHandler(method, path, op, baseURL),
 	)
 }
 
-func makeHTTPHandler(method, pathTemplate string, op *huma.Operation, baseURL string) func(context.Context, mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func makeHTTPHandler(method, pathTemplate string, op *huma.Operation, baseURL string) func(context.Context, mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+	return func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
 		args, _ := req.Params.Arguments.(map[string]any)
 		if args == nil {
 			args = map[string]any{}
 		}
 
-		// Fill path parameters.
 		urlPath := pathTemplate
 		queryParams := url.Values{}
 
@@ -124,8 +123,6 @@ func makeHTTPHandler(method, pathTemplate string, op *huma.Operation, baseURL st
 				urlPath = strings.ReplaceAll(urlPath, "{"+param.Name+"}", url.PathEscape(strVal))
 			case "query":
 				queryParams.Set(param.Name, strVal)
-			case "header":
-				// headers handled below
 			}
 		}
 
@@ -138,20 +135,19 @@ func makeHTTPHandler(method, pathTemplate string, op *huma.Operation, baseURL st
 		if body, ok := args["body"]; ok && body != nil {
 			bodyBytes, err := marshalBody(body)
 			if err != nil {
-				return mcp.NewToolResultError("could not marshal body: " + err.Error()), nil
+				return mcplib.NewToolResultError("could not marshal body: " + err.Error()), nil
 			}
 			bodyReader = bytes.NewReader(bodyBytes)
 		}
 
 		httpReq, err := http.NewRequestWithContext(ctx, method, fullURL, bodyReader)
 		if err != nil {
-			return mcp.NewToolResultError(err.Error()), nil
+			return mcplib.NewToolResultError(err.Error()), nil
 		}
 		if bodyReader != nil {
 			httpReq.Header.Set("Content-Type", "application/json")
 		}
 
-		// Pass through header parameters.
 		for _, param := range op.Parameters {
 			if param.In != "header" {
 				continue
@@ -163,15 +159,15 @@ func makeHTTPHandler(method, pathTemplate string, op *huma.Operation, baseURL st
 
 		resp, err := http.DefaultClient.Do(httpReq)
 		if err != nil {
-			return mcp.NewToolResultError(err.Error()), nil
+			return mcplib.NewToolResultError(err.Error()), nil
 		}
 		defer resp.Body.Close()
 
 		respBody, _ := io.ReadAll(resp.Body)
 		if resp.StatusCode >= 400 {
-			return mcp.NewToolResultError(string(respBody)), nil
+			return mcplib.NewToolResultError(string(respBody)), nil
 		}
-		return mcp.NewToolResultText(string(respBody)), nil
+		return mcplib.NewToolResultText(string(respBody)), nil
 	}
 }
 

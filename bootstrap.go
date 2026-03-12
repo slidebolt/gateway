@@ -3,13 +3,11 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
-	"os"
-	"os/signal"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/danielgtaylor/huma/v2"
@@ -17,43 +15,47 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/nats-io/nats.go"
 	regsvc "github.com/slidebolt/registry"
-	runner "github.com/slidebolt/sdk-runner"
 	"github.com/slidebolt/sdk-types"
+
+	"github.com/slidebolt/gateway/internal/history"
+	gatewaymcp "github.com/slidebolt/gateway/internal/mcp"
 )
 
 func run() {
-	apiHost := os.Getenv(runner.EnvAPIHost)
+	apiHost := getenv(types.EnvAPIHost)
 	if apiHost == "" {
 		apiHost = "127.0.0.1"
 	}
-	apiPort, err := runner.RequireEnv(runner.EnvAPIPort)
+	apiPort, err := requireEnv(types.EnvAPIPort)
 	if err != nil {
 		log.Fatal(err)
 	}
-	natsURL, err := runner.RequireEnv(runner.EnvNATSURL)
+	natsURL, err := requireEnv(types.EnvNATSURL)
 	if err != nil {
 		log.Fatal(err)
 	}
-	rpcSubject := os.Getenv(runner.EnvPluginRPCSbj)
-	dataDir, err := runner.RequireEnv(runner.EnvPluginData)
+	rpcSubject := getenv(types.EnvPluginRPCSbj)
+	dataDir, err := requireEnv(types.EnvPluginDataDir)
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	vstore = loadVirtualStore(dataDir)
+	gatewayDataDir = dataDir
+	commandService = CommandService()
+	defer commandService.Close()
 	historyPath := filepath.Join(dataDir, "history.db")
-	history, err = openHistoryStore(historyPath)
+	historyService, err = history.Open(historyPath)
 	if err != nil {
 		log.Fatalf("Gateway: failed to open history store: %v", err)
 	}
 	defer func() {
-		if err := history.Close(); err != nil {
+		if err := historyService.Close(); err != nil {
 			log.Printf("Gateway: history close error: %v", err)
 		}
 	}()
-	gatewayRT = gatewayRuntimeInfo{NATSURL: natsURL, Version: os.Getenv("APP_VERSION")}
+	gatewayRT = gatewayRuntimeInfo{NATSURL: natsURL, Version: getenv("APP_VERSION")}
 
-	gatewayID := strings.TrimPrefix(rpcSubject, runner.SubjectRPCPrefix)
+	gatewayID := strings.TrimPrefix(rpcSubject, types.SubjectRPCPrefix)
 	if gatewayID == "" {
 		gatewayID = "gateway"
 	}
@@ -72,9 +74,23 @@ func run() {
 	}
 	defer nc.Close()
 
-	masterRegistry = regsvc.NewService()
-	_ = masterRegistry.Ingest(nc)
-	hydrateRegistryFromVStore()
+	registryService = regsvc.RegistryService(
+		"gateway",
+		regsvc.WithNATS(nc),
+		regsvc.WithAggregate(),
+		regsvc.WithPersist(regsvc.PersistNever),
+	)
+	if err := registryService.LoadAll(); err != nil {
+		log.Fatalf("Gateway: failed to load registry: %v", err)
+	}
+	if err := registryService.Start(); err != nil {
+		log.Fatalf("Gateway: failed to start registry: %v", err)
+	}
+	defer func() {
+		if err := registryService.Stop(); err != nil {
+			log.Printf("Gateway: registryService.Stop error: %v", err)
+		}
+	}()
 
 	startNATSDiscoveryBridge()
 
@@ -85,7 +101,7 @@ func run() {
 
 	_, err = js.AddStream(&nats.StreamConfig{
 		Name:     "EVENTS",
-		Subjects: []string{runner.SubjectEntityEvents},
+		Subjects: []string{types.SubjectEntityEvents},
 		Storage:  nats.FileStorage,
 		MaxMsgs:  5000,
 	})
@@ -95,7 +111,7 @@ func run() {
 
 	_, err = js.AddStream(&nats.StreamConfig{
 		Name:     "COMMANDS",
-		Subjects: []string{runner.SubjectCommandStatus},
+		Subjects: []string{types.SubjectCommandStatus},
 		Storage:  nats.FileStorage,
 		MaxMsgs:  5000,
 	})
@@ -104,14 +120,16 @@ func run() {
 	}
 
 	historyCtx, stopHistory := context.WithCancel(context.Background())
-	startHistoryConsumers(historyCtx)
+	historyService.Start(historyCtx, nc, js)
+	startGatewayDiagnostics()
 
 	subscribeRegistry()
-	subscribeEntityEvents()
 	selfRegister(rpcSubject)
-	startDiscoveryProbe()
+	startDiscoveryProbe(historyCtx)
 
-	r := gin.Default()
+	gin.SetMode(gin.ReleaseMode)
+	r := gin.New()
+	r.Use(requestLogger(), gin.Recovery())
 
 	config := huma.DefaultConfig("SlideBolt Gateway API", "1.0.0")
 	config.Info.Description = "REST API for managing plugins, devices, entities, scripts, commands, and events. " +
@@ -129,7 +147,8 @@ func run() {
 
 	api := humagin.New(r, config)
 	registerRoutes(api)
-	r.GET("/api/topics/subscribe", sseHandler)
+	historyService.RegisterRoutes(api)
+	r.GET("/api/topics/subscribe", historyService.SSEHandler())
 
 	srv := &http.Server{
 		Addr:    apiHost + ":" + apiPort,
@@ -144,12 +163,10 @@ func run() {
 
 	// MCP bridge over Stdio — tools are generated directly from the OpenAPI spec,
 	// so every REST route is automatically available to AI agents.
-	mcpBridge := NewMCPBridge(api, "http://"+apiHost+":"+apiPort)
+	mcpBridge := gatewaymcp.New(api, "http://"+apiHost+":"+apiPort)
 	go mcpBridge.Serve()
 
-	quit := make(chan os.Signal, 1)
-	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
-	<-quit
+	waitForShutdownSignal()
 	log.Println("Shutting down gateway...")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -164,19 +181,22 @@ func run() {
 }
 
 func subscribeRegistry() {
-	_, _ = nc.Subscribe(runner.SubjectRegistration, func(m *nats.Msg) {
+	_, _ = nc.Subscribe(types.SubjectRegistration, func(m *nats.Msg) {
 		var reg types.Registration
-		if err := json.Unmarshal(m.Data, &reg); err == nil {
-			for _, schema := range reg.Manifest.Schemas {
-				types.RegisterDomain(schema)
-			}
-			regMu.Lock()
-			registry[reg.Manifest.ID] = pluginRecord{
-				Registration: reg,
-				Valid:        true,
-			}
-			regMu.Unlock()
+		if err := json.Unmarshal(m.Data, &reg); err != nil {
+			log.Printf("Gateway: failed to unmarshal registration: %v", err)
+			return
 		}
+
+		for _, schema := range reg.Manifest.Schemas {
+			types.RegisterDomain(schema)
+		}
+		regMu.Lock()
+		registry[reg.Manifest.ID] = pluginRecord{
+			Registration: reg,
+			Valid:        true,
+		}
+		regMu.Unlock()
 	})
 }
 
@@ -184,7 +204,7 @@ func selfRegister(rpcSubject string) {
 	if rpcSubject == "" {
 		return
 	}
-	gatewayID := strings.TrimPrefix(rpcSubject, runner.SubjectRPCPrefix)
+	gatewayID := strings.TrimPrefix(rpcSubject, types.SubjectRPCPrefix)
 	manifest := types.Manifest{ID: gatewayID, Name: "SlideBolt Gateway", Version: "1.0.0"}
 	reg := types.Registration{Manifest: manifest, RPCSubject: rpcSubject}
 	regData, _ := json.Marshal(reg)
@@ -194,7 +214,7 @@ func selfRegister(rpcSubject string) {
 		json.Unmarshal(m.Data, &req)
 		var result any
 		var rpcErr *types.RPCError
-		if req.Method == runner.HealthEndpoint {
+		if req.Method == types.RPCMethodHealthCheck {
 			result = map[string]string{"status": "perfect", "service": "gateway"}
 		} else {
 			rpcErr = &types.RPCError{Code: -32601, Message: "method not found"}
@@ -208,10 +228,12 @@ func selfRegister(rpcSubject string) {
 			resp.ID = *req.ID
 		}
 		data, _ := json.Marshal(resp)
-		m.Respond(data)
+		if err := m.Respond(data); err != nil {
+			log.Printf("Gateway: failed to respond to message: %v", err)
+		}
 	})
 
-	_, _ = nc.Subscribe(runner.SubjectSearchPlugins, func(m *nats.Msg) {
+	_, _ = nc.Subscribe(types.SubjectSearchPlugins, func(m *nats.Msg) {
 		res := types.SearchPluginsResponse{
 			PluginID: gatewayID,
 			Matches:  []types.Manifest{manifest},
@@ -220,30 +242,34 @@ func selfRegister(rpcSubject string) {
 		_ = m.Respond(data)
 	})
 
-
-
-	_ = nc.Publish(runner.SubjectRegistration, regData)
-	_, _ = nc.Subscribe(runner.SubjectDiscoveryProbe, func(m *nats.Msg) {
-		_ = nc.Publish(runner.SubjectRegistration, regData)
+	_ = nc.Publish(types.SubjectRegistration, regData)
+	_, _ = nc.Subscribe(types.SubjectDiscoveryProbe, func(m *nats.Msg) {
+		_ = nc.Publish(types.SubjectRegistration, regData)
 	})
 }
 
-func startDiscoveryProbe() {
+func startDiscoveryProbe(ctx context.Context) {
 	go func() {
 		for {
-			_ = nc.Publish(runner.SubjectDiscoveryProbe, []byte("probe"))
-			time.Sleep(2 * time.Second)
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+			_ = nc.Publish(types.SubjectDiscoveryProbe, []byte("probe"))
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(2 * time.Second):
+			}
 		}
 	}()
 }
 
-func hydrateRegistryFromVStore() {
-	if vstore == nil || masterRegistry == nil {
-		return
+func requireEnv(key string) (string, error) {
+	v := strings.TrimSpace(getenv(key))
+	if v == "" {
+		return "", fmt.Errorf("required environment variable %s is not set", key)
 	}
-	vstore.mu.RLock()
-	defer vstore.mu.RUnlock()
-	for _, rec := range vstore.entities {
-		masterRegistry.UpdateEntity(rec.OwnerPluginID, rec.Entity)
-	}
+	return v, nil
 }

@@ -1,4 +1,4 @@
-package main
+package history
 
 import (
 	"context"
@@ -7,21 +7,26 @@ import (
 	"time"
 
 	"github.com/nats-io/nats.go"
-	runner "github.com/slidebolt/sdk-runner"
 	"github.com/slidebolt/sdk-types"
 )
 
-func startHistoryConsumers(ctx context.Context) {
-	if history == nil || js == nil {
-		return
-	}
-	go consumeEventHistory(ctx)
-	go consumeCommandHistory(ctx)
+func classifyEventName() string {
+	return "entity.statechange"
 }
 
-func consumeEventHistory(ctx context.Context) {
+func (h *History) subscribeEntityEvents(nc *nats.Conn) {
+	_, _ = nc.Subscribe(types.SubjectEntityEvents, func(m *nats.Msg) {
+		var env types.EntityEventEnvelope
+		if err := json.Unmarshal(m.Data, &env); err != nil {
+			return
+		}
+		h.broker.broadcast(sseMessage{Type: "entity", PluginID: env.PluginID, DeviceID: env.DeviceID, EntityID: env.EntityID})
+	})
+}
+
+func (h *History) consumeEvents(ctx context.Context, js nats.JetStreamContext) {
 	sub, err := js.PullSubscribe(
-		runner.SubjectEntityEvents,
+		types.SubjectEntityEvents,
 		"gateway-history-events",
 		nats.BindStream("EVENTS"),
 	)
@@ -55,18 +60,18 @@ func consumeEventHistory(ctx context.Context) {
 				_ = msg.Ack()
 				continue
 			}
-			if err := history.InsertEvent(meta.Sequence.Stream, meta.Timestamp.UTC(), env); err != nil {
+			if err := h.insertEvent(meta.Sequence.Stream, meta.Timestamp.UTC(), env); err != nil {
 				log.Printf("history events insert failed (seq=%d): %v", meta.Sequence.Stream, err)
 				_ = msg.Nak()
 				continue
 			}
-			broker.broadcast(sseMessage{
+			h.broker.broadcast(sseMessage{
 				Type:      "log",
 				Kind:      "event",
 				PluginID:  env.PluginID,
 				DeviceID:  env.DeviceID,
 				EntityID:  env.EntityID,
-				Name:      classifyEventName(env.EntityType, env.Payload, false),
+				Name:      classifyEventName(),
 				EventID:   env.EventID,
 				CreatedAt: meta.Timestamp.UTC().Format(time.RFC3339Nano),
 				Seq:       meta.Sequence.Stream,
@@ -76,9 +81,9 @@ func consumeEventHistory(ctx context.Context) {
 	}
 }
 
-func consumeCommandHistory(ctx context.Context) {
+func (h *History) consumeCommands(ctx context.Context, js nats.JetStreamContext) {
 	sub, err := js.PullSubscribe(
-		runner.SubjectCommandStatus,
+		types.SubjectCommandStatus,
 		"gateway-history-commands",
 		nats.BindStream("COMMANDS"),
 	)
@@ -116,12 +121,12 @@ func consumeCommandHistory(ctx context.Context) {
 				_ = msg.Ack()
 				continue
 			}
-			if err := history.InsertCommandStatus(meta.Sequence.Stream, status); err != nil {
+			if err := h.insertCommandStatus(meta.Sequence.Stream, status); err != nil {
 				log.Printf("history commands insert failed (seq=%d): %v", meta.Sequence.Stream, err)
 				_ = msg.Nak()
 				continue
 			}
-			broker.broadcast(sseMessage{
+			h.broker.broadcast(sseMessage{
 				Type:      "log",
 				Kind:      "command",
 				PluginID:  status.PluginID,

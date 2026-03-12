@@ -1,18 +1,29 @@
-package main
+package history
 
 import (
+	"context"
 	"database/sql"
+	"database/sql/driver"
 	"encoding/json"
 	"fmt"
+	"log"
 	"sort"
 	"time"
 
-	_ "modernc.org/sqlite"
+	"modernc.org/sqlite"
 
+	"github.com/nats-io/nats.go"
 	"github.com/slidebolt/sdk-types"
 )
 
-type historyStats struct {
+// History is the top-level handle for the history subsystem: SQLite store,
+// JetStream consumers, SSE broker, and HTTP routes.
+type History struct {
+	db     *sql.DB
+	broker *sseBroker
+}
+
+type Stats struct {
 	EventCount   int64 `json:"event_count"`
 	CommandCount int64 `json:"command_count"`
 }
@@ -50,33 +61,63 @@ type entityRate struct {
 	TotalPerSec    float64 `json:"total_per_sec"`
 }
 
-type historyStore struct {
-	db *sql.DB
+// traceEntry is a unified event-or-command record returned by TraceSince.
+type traceEntry struct {
+	Kind     string          `json:"kind"` // "event" or "command"
+	Ts       time.Time       `json:"ts"`
+	Name     string          `json:"name"`
+	EventKey string          `json:"event_key,omitempty"`
+	State    string          `json:"state,omitempty"`
+	Error    string          `json:"error,omitempty"`
+	Data     json.RawMessage `json:"data,omitempty"`
 }
 
-func openHistoryStore(path string) (*historyStore, error) {
-	db, err := sql.Open("sqlite", path)
+type observedEvent struct {
+	Name      string    `json:"name"`
+	PluginID  string    `json:"plugin_id"`
+	DeviceID  string    `json:"device_id"`
+	EntityID  string    `json:"entity_id"`
+	EventID   string    `json:"event_id"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// sqliteConnector opens SQLite connections with PRAGMAs applied per-connection.
+type sqliteConnector struct{ path string }
+
+func (c *sqliteConnector) Connect(_ context.Context) (driver.Conn, error) {
+	conn, err := (&sqlite.Driver{}).Open(c.path)
 	if err != nil {
 		return nil, err
 	}
-	// SQLite connection-level PRAGMAs (busy_timeout, journal mode) are not
-	// consistently applied across a pool of multiple connections.
-	// Keep a single shared connection to avoid transient lock/drop behavior
-	// under concurrent readers/writers.
-	db.SetMaxOpenConns(1)
-	db.SetMaxIdleConns(1)
-	if _, err := db.Exec("PRAGMA journal_mode=WAL;"); err != nil {
-		_ = db.Close()
-		return nil, err
+	for _, p := range []string{
+		"PRAGMA journal_mode=WAL",
+		"PRAGMA synchronous=NORMAL",
+		"PRAGMA busy_timeout=10000",
+	} {
+		st, err := conn.Prepare(p)
+		if err != nil {
+			_ = conn.Close()
+			return nil, fmt.Errorf("sqlite pragma %q: %w", p, err)
+		}
+		rows, err := st.Query(nil)
+		if err == nil {
+			if cerr := rows.Close(); cerr != nil {
+				log.Printf("history: rows.Close error in sqliteConnector.Connect: %v", cerr)
+			}
+		}
+		_ = st.Close()
 	}
-	if _, err := db.Exec("PRAGMA synchronous=NORMAL;"); err != nil {
-		_ = db.Close()
-		return nil, err
-	}
-	if _, err := db.Exec("PRAGMA busy_timeout=5000;"); err != nil {
-		_ = db.Close()
-		return nil, err
-	}
+	return conn, nil
+}
+
+func (c *sqliteConnector) Driver() driver.Driver { return &sqlite.Driver{} }
+
+// Open opens the SQLite history store at the given path.
+func Open(path string) (*History, error) {
+	db := sql.OpenDB(&sqliteConnector{path: path})
+	db.SetMaxOpenConns(8)
+	db.SetMaxIdleConns(2)
+	db.SetConnMaxLifetime(0)
 
 	schema := []string{
 		`CREATE TABLE IF NOT EXISTS history_events (
@@ -113,10 +154,8 @@ func openHistoryStore(path string) (*historyStore, error) {
 		}
 	}
 	migrations := []string{
-		// Migrations: add columns if not present (idempotent — SQLite ignores duplicate column errors).
 		`ALTER TABLE history_events ADD COLUMN payload_json TEXT`,
 		`ALTER TABLE history_events ADD COLUMN entity_type TEXT NOT NULL DEFAULT ''`,
-		// Stores the original command payload (body sent by the caller) keyed by command_id.
 		`CREATE TABLE IF NOT EXISTS history_command_payloads (
 			command_id   TEXT PRIMARY KEY,
 			payload_json TEXT NOT NULL
@@ -126,17 +165,38 @@ func openHistoryStore(path string) (*historyStore, error) {
 		_, _ = db.Exec(stmt)
 	}
 
-	return &historyStore{db: db}, nil
+	return &History{db: db, broker: newSSEBroker()}, nil
 }
 
-func (h *historyStore) Close() error {
+// Start subscribes to NATS entity events and launches JetStream consumers.
+func (h *History) Start(ctx context.Context, nc *nats.Conn, js nats.JetStreamContext) {
+	h.subscribeEntityEvents(nc)
+	go h.consumeEvents(ctx, js)
+	go h.consumeCommands(ctx, js)
+}
+
+func (h *History) Close() error {
 	if h == nil || h.db == nil {
 		return nil
 	}
 	return h.db.Close()
 }
 
-func (h *historyStore) InsertEvent(streamSeq uint64, ts time.Time, env types.EntityEventEnvelope) error {
+func (h *History) Prune() error {
+	if h == nil || h.db == nil {
+		return nil
+	}
+	tables := []string{"history_events", "history_command_status", "history_command_payloads"}
+	for _, table := range tables {
+		if _, err := h.db.Exec(fmt.Sprintf("DELETE FROM %s", table)); err != nil {
+			return fmt.Errorf("prune %s: %w", table, err)
+		}
+	}
+	_, err := h.db.Exec("VACUUM")
+	return err
+}
+
+func (h *History) insertEvent(streamSeq uint64, ts time.Time, env types.EntityEventEnvelope) error {
 	if h == nil {
 		return nil
 	}
@@ -149,7 +209,7 @@ func (h *historyStore) InsertEvent(streamSeq uint64, ts time.Time, env types.Ent
 		(stream_seq, name, plugin_id, device_id, entity_id, entity_type, event_id, created_at, payload_json)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		streamSeq,
-		classifyEventName(env.EntityType, env.Payload, false),
+		classifyEventName(),
 		env.PluginID,
 		env.DeviceID,
 		env.EntityID,
@@ -161,7 +221,7 @@ func (h *historyStore) InsertEvent(streamSeq uint64, ts time.Time, env types.Ent
 	return err
 }
 
-func (h *historyStore) InsertCommandStatus(streamSeq uint64, status types.CommandStatus) error {
+func (h *History) insertCommandStatus(streamSeq uint64, status types.CommandStatus) error {
 	if h == nil {
 		return nil
 	}
@@ -186,20 +246,7 @@ func (h *historyStore) InsertCommandStatus(streamSeq uint64, status types.Comman
 	return err
 }
 
-// StoreCommandPayload records the original command body for a given command_id.
-// Called at dispatch time so TraceSince can show the real Payload.type.
-func (h *historyStore) StoreCommandPayload(commandID string, payload json.RawMessage) error {
-	if h == nil || len(payload) == 0 {
-		return nil
-	}
-	_, err := h.db.Exec(
-		`INSERT OR IGNORE INTO history_command_payloads (command_id, payload_json) VALUES (?, ?)`,
-		commandID, string(payload),
-	)
-	return err
-}
-
-func (h *historyStore) LatestCommandStatus(commandID string) (types.CommandStatus, bool, error) {
+func (h *History) latestCommandStatus(commandID string) (types.CommandStatus, bool, error) {
 	var raw string
 	err := h.db.QueryRow(
 		`SELECT payload_json
@@ -222,7 +269,7 @@ func (h *historyStore) LatestCommandStatus(commandID string) (types.CommandStatu
 	return out, true, nil
 }
 
-func (h *historyStore) ListEvents(pluginID, deviceID, entityID string, limit int) ([]observedEvent, error) {
+func (h *History) listEvents(pluginID, deviceID, entityID string, limit int) ([]observedEvent, error) {
 	if limit <= 0 {
 		limit = 500
 	}
@@ -239,7 +286,11 @@ func (h *historyStore) ListEvents(pluginID, deviceID, entityID string, limit int
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() {
+		if cerr := rows.Close(); cerr != nil {
+			log.Printf("history: rows.Close error in listEvents: %v", cerr)
+		}
+	}()
 
 	out := make([]observedEvent, 0)
 	for rows.Next() {
@@ -258,44 +309,26 @@ func (h *historyStore) ListEvents(pluginID, deviceID, entityID string, limit int
 	return out, rows.Err()
 }
 
-func (h *historyStore) Stats() (historyStats, error) {
-	var stats historyStats
-	if err := h.db.QueryRow(`SELECT COUNT(1) FROM history_events`).Scan(&stats.EventCount); err != nil {
-		return stats, err
+func (h *History) stats() (Stats, error) {
+	var s Stats
+	if err := h.db.QueryRow(`SELECT COUNT(1) FROM history_events`).Scan(&s.EventCount); err != nil {
+		return s, err
 	}
-	if err := h.db.QueryRow(`SELECT COUNT(1) FROM history_command_status`).Scan(&stats.CommandCount); err != nil {
-		return stats, err
+	if err := h.db.QueryRow(`SELECT COUNT(1) FROM history_command_status`).Scan(&s.CommandCount); err != nil {
+		return s, err
 	}
-	return stats, nil
+	return s, nil
 }
 
-func (h *historyStore) Prune() error {
-	if h == nil || h.db == nil {
-		return nil
-	}
-	tables := []string{"history_events", "history_command_status", "history_command_payloads"}
-	for _, table := range tables {
-		if _, err := h.db.Exec(fmt.Sprintf("DELETE FROM %s", table)); err != nil {
-			return fmt.Errorf("prune %s: %w", table, err)
-		}
-	}
-	_, err := h.db.Exec("VACUUM")
-	return err
-}
-
-func (h *historyStore) PluginRates(windowSeconds int) ([]pluginRate, error) {
+func (h *History) pluginRates(windowSeconds int) ([]pluginRate, error) {
 	if windowSeconds <= 0 {
 		windowSeconds = 30
 	}
 	cutoff := time.Now().UTC().Add(-time.Duration(windowSeconds) * time.Second).Format(time.RFC3339Nano)
-
 	rates := make(map[string]*pluginRate)
 
 	eventRows, err := h.db.Query(
-		`SELECT plugin_id, COUNT(1)
-		 FROM history_events
-		 WHERE created_at >= ?
-		 GROUP BY plugin_id`,
+		`SELECT plugin_id, COUNT(1) FROM history_events WHERE created_at >= ? GROUP BY plugin_id`,
 		cutoff,
 	)
 	if err != nil {
@@ -305,7 +338,9 @@ func (h *historyStore) PluginRates(windowSeconds int) ([]pluginRate, error) {
 		var pluginID string
 		var count int64
 		if err := eventRows.Scan(&pluginID, &count); err != nil {
-			eventRows.Close()
+			if cerr := eventRows.Close(); cerr != nil {
+				log.Printf("history: eventRows.Close error in pluginRates: %v", cerr)
+			}
 			return nil, err
 		}
 		if rates[pluginID] == nil {
@@ -320,10 +355,7 @@ func (h *historyStore) PluginRates(windowSeconds int) ([]pluginRate, error) {
 	eventRows.Close()
 
 	commandRows, err := h.db.Query(
-		`SELECT plugin_id, COUNT(DISTINCT command_id)
-		 FROM history_command_status
-		 WHERE created_at >= ?
-		 GROUP BY plugin_id`,
+		`SELECT plugin_id, COUNT(DISTINCT command_id) FROM history_command_status WHERE created_at >= ? GROUP BY plugin_id`,
 		cutoff,
 	)
 	if err != nil {
@@ -365,24 +397,18 @@ func (h *historyStore) PluginRates(windowSeconds int) ([]pluginRate, error) {
 	return out, nil
 }
 
-func (h *historyStore) DeviceRates(pluginID string, windowSeconds int) ([]deviceRate, error) {
+func (h *History) deviceRates(pluginID string, windowSeconds int) ([]deviceRate, error) {
 	if windowSeconds <= 0 {
 		windowSeconds = 30
 	}
 	cutoff := time.Now().UTC().Add(-time.Duration(windowSeconds) * time.Second).Format(time.RFC3339Nano)
 
-	type key struct {
-		pluginID string
-		deviceID string
-	}
+	type key struct{ pluginID, deviceID string }
 	rates := make(map[key]*deviceRate)
 
 	eventRows, err := h.db.Query(
-		`SELECT plugin_id, device_id, COUNT(1)
-		 FROM history_events
-		 WHERE created_at >= ?
-		   AND (? = '' OR plugin_id = ?)
-		 GROUP BY plugin_id, device_id`,
+		`SELECT plugin_id, device_id, COUNT(1) FROM history_events
+		 WHERE created_at >= ? AND (? = '' OR plugin_id = ?) GROUP BY plugin_id, device_id`,
 		cutoff, pluginID, pluginID,
 	)
 	if err != nil {
@@ -395,7 +421,7 @@ func (h *historyStore) DeviceRates(pluginID string, windowSeconds int) ([]device
 			eventRows.Close()
 			return nil, err
 		}
-		k := key{pluginID: pID, deviceID: dID}
+		k := key{pID, dID}
 		if rates[k] == nil {
 			rates[k] = &deviceRate{PluginID: pID, DeviceID: dID}
 		}
@@ -408,11 +434,8 @@ func (h *historyStore) DeviceRates(pluginID string, windowSeconds int) ([]device
 	eventRows.Close()
 
 	commandRows, err := h.db.Query(
-		`SELECT plugin_id, device_id, COUNT(DISTINCT command_id)
-		 FROM history_command_status
-		 WHERE created_at >= ?
-		   AND (? = '' OR plugin_id = ?)
-		 GROUP BY plugin_id, device_id`,
+		`SELECT plugin_id, device_id, COUNT(DISTINCT command_id) FROM history_command_status
+		 WHERE created_at >= ? AND (? = '' OR plugin_id = ?) GROUP BY plugin_id, device_id`,
 		cutoff, pluginID, pluginID,
 	)
 	if err != nil {
@@ -425,7 +448,7 @@ func (h *historyStore) DeviceRates(pluginID string, windowSeconds int) ([]device
 			commandRows.Close()
 			return nil, err
 		}
-		k := key{pluginID: pID, deviceID: dID}
+		k := key{pID, dID}
 		if rates[k] == nil {
 			rates[k] = &deviceRate{PluginID: pID, DeviceID: dID}
 		}
@@ -458,25 +481,18 @@ func (h *historyStore) DeviceRates(pluginID string, windowSeconds int) ([]device
 	return out, nil
 }
 
-func (h *historyStore) EntityRates(pluginID, deviceID string, windowSeconds int) ([]entityRate, error) {
+func (h *History) entityRates(pluginID, deviceID string, windowSeconds int) ([]entityRate, error) {
 	if windowSeconds <= 0 {
 		windowSeconds = 30
 	}
 	cutoff := time.Now().UTC().Add(-time.Duration(windowSeconds) * time.Second).Format(time.RFC3339Nano)
 
-	type key struct {
-		pluginID string
-		deviceID string
-		entityID string
-	}
+	type key struct{ pluginID, deviceID, entityID string }
 	rates := make(map[key]*entityRate)
 
 	eventRows, err := h.db.Query(
-		`SELECT plugin_id, device_id, entity_id, COUNT(1)
-		 FROM history_events
-		 WHERE created_at >= ?
-		   AND (? = '' OR plugin_id = ?)
-		   AND (? = '' OR device_id = ?)
+		`SELECT plugin_id, device_id, entity_id, COUNT(1) FROM history_events
+		 WHERE created_at >= ? AND (? = '' OR plugin_id = ?) AND (? = '' OR device_id = ?)
 		 GROUP BY plugin_id, device_id, entity_id`,
 		cutoff, pluginID, pluginID, deviceID, deviceID,
 	)
@@ -490,7 +506,7 @@ func (h *historyStore) EntityRates(pluginID, deviceID string, windowSeconds int)
 			eventRows.Close()
 			return nil, err
 		}
-		k := key{pluginID: pID, deviceID: dID, entityID: eID}
+		k := key{pID, dID, eID}
 		if rates[k] == nil {
 			rates[k] = &entityRate{PluginID: pID, DeviceID: dID, EntityID: eID}
 		}
@@ -503,11 +519,8 @@ func (h *historyStore) EntityRates(pluginID, deviceID string, windowSeconds int)
 	eventRows.Close()
 
 	commandRows, err := h.db.Query(
-		`SELECT plugin_id, device_id, entity_id, COUNT(DISTINCT command_id)
-		 FROM history_command_status
-		 WHERE created_at >= ?
-		   AND (? = '' OR plugin_id = ?)
-		   AND (? = '' OR device_id = ?)
+		`SELECT plugin_id, device_id, entity_id, COUNT(DISTINCT command_id) FROM history_command_status
+		 WHERE created_at >= ? AND (? = '' OR plugin_id = ?) AND (? = '' OR device_id = ?)
 		 GROUP BY plugin_id, device_id, entity_id`,
 		cutoff, pluginID, pluginID, deviceID, deviceID,
 	)
@@ -521,7 +534,7 @@ func (h *historyStore) EntityRates(pluginID, deviceID string, windowSeconds int)
 			commandRows.Close()
 			return nil, err
 		}
-		k := key{pluginID: pID, deviceID: dID, entityID: eID}
+		k := key{pID, dID, eID}
 		if rates[k] == nil {
 			rates[k] = &entityRate{PluginID: pID, DeviceID: dID, EntityID: eID}
 		}
@@ -557,34 +570,15 @@ func (h *historyStore) EntityRates(pluginID, deviceID string, windowSeconds int)
 	return out, nil
 }
 
-// traceEntry is a unified event-or-command record returned by TraceSince.
-// Name is EventRef.Type for events and Payload.type for commands — the exact
-// strings needed to write Ctx:OnEvent / Ctx:SendCommand in Lua.
-// EventKey is the Ctx:OnEvent subscription key: "{plugin_id}.{device_id}.{entity_id}".
-type traceEntry struct {
-	Kind     string          `json:"kind"`               // "event" or "command"
-	Ts       time.Time       `json:"ts"`
-	Name     string          `json:"name"`               // EventRef.Type / Payload.type
-	EventKey string          `json:"event_key,omitempty"` // Ctx:OnEvent key (events only)
-	State    string          `json:"state,omitempty"`    // command state
-	Error    string          `json:"error,omitempty"`    // command error
-	Data     json.RawMessage `json:"data,omitempty"`
-}
-
-// TraceSince returns events and commands for the given entity that occurred
-// strictly after since, sorted chronologically. For commands, only the latest
-// state per command_id is returned.
-func (h *historyStore) TraceSince(pluginID, deviceID, entityID string, since time.Time) ([]traceEntry, error) {
+func (h *History) traceSince(pluginID, deviceID, entityID string, since time.Time) ([]traceEntry, error) {
 	if h == nil {
 		return []traceEntry{}, nil
 	}
 	sinceStr := since.UTC().Format(time.RFC3339Nano)
+	eventKey := pluginID + "." + deviceID + "." + entityID
 
 	var entries []traceEntry
 
-	eventKey := pluginID + "." + deviceID + "." + entityID
-
-	// ── Events ──────────────────────────────────────────────────────────────────
 	eventRows, err := h.db.Query(
 		`SELECT created_at, COALESCE(payload_json, '')
 		 FROM history_events
@@ -605,12 +599,9 @@ func (h *historyStore) TraceSince(pluginID, deviceID, entityID string, since tim
 			return nil, err
 		}
 		t, _ := time.Parse(time.RFC3339Nano, createdAt)
-		// Name = EventRef.Type (the payload "type" field — exactly what Lua sees).
 		name := ""
 		if payload != "" {
-			var p struct {
-				Type string `json:"type"`
-			}
+			var p struct{ Type string `json:"type"` }
 			if json.Unmarshal([]byte(payload), &p) == nil {
 				name = p.Type
 			}
@@ -625,8 +616,6 @@ func (h *historyStore) TraceSince(pluginID, deviceID, entityID string, since tim
 		return nil, err
 	}
 
-	// ── Commands ─────────────────────────────────────────────────────────────────
-	// One row per command_id (latest state), joined with the original command payload.
 	cmdRows, err := h.db.Query(
 		`SELECT hcs.payload_json, hcs.created_at, COALESCE(hcp.payload_json, '')
 		 FROM history_command_status hcs
@@ -653,23 +642,14 @@ func (h *historyStore) TraceSince(pluginID, deviceID, entityID string, since tim
 		if err := json.Unmarshal([]byte(statusJSON), &status); err != nil {
 			continue
 		}
-		// Name = Payload.type from the original command body (what Lua passes to SendCommand).
 		name := ""
 		if cmdPayload != "" {
-			var p struct {
-				Type string `json:"type"`
-			}
+			var p struct{ Type string `json:"type"` }
 			if json.Unmarshal([]byte(cmdPayload), &p) == nil {
 				name = p.Type
 			}
 		}
-		e := traceEntry{
-			Kind:  "command",
-			Ts:    t.UTC(),
-			Name:  name,
-			State: string(status.State),
-			Error: status.Error,
-		}
+		e := traceEntry{Kind: "command", Ts: t.UTC(), Name: name, State: string(status.State), Error: status.Error}
 		if cmdPayload != "" {
 			e.Data = json.RawMessage(cmdPayload)
 		}
@@ -679,9 +659,7 @@ func (h *historyStore) TraceSince(pluginID, deviceID, entityID string, since tim
 		return nil, err
 	}
 
-	sort.Slice(entries, func(i, j int) bool {
-		return entries[i].Ts.Before(entries[j].Ts)
-	})
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Ts.Before(entries[j].Ts) })
 
 	if entries == nil {
 		return []traceEntry{}, nil

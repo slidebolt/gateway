@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/nats-io/nats.go"
+	regsvc "github.com/slidebolt/registry"
 	"github.com/slidebolt/sdk-types"
 )
 
@@ -221,14 +222,40 @@ func CreateTestDB(t *testing.T) (*sql.DB, func()) {
 
 // ResetGlobals resets global state between tests
 func ResetGlobals() {
+	if commandService != nil {
+		commandService.Close()
+		commandService = nil
+	}
 	regMu.Lock()
 	registry = make(map[string]pluginRecord)
 	regMu.Unlock()
+}
 
-	if vstore != nil {
-		vstore.mu.Lock()
-		vstore.entities = make(map[string]virtualEntityRecord)
-		vstore.commands = make(map[string]virtualCommandRecord)
-		vstore.mu.Unlock()
-	}
+// setupCommandServiceHarness sets up nc, registryService, and commandService for command tests
+func setupCommandServiceHarness(t *testing.T) {
+	t.Helper()
+	s, conn := setupTestServer(t)
+	t.Cleanup(func() {
+		teardownTestServer(t, s, conn)
+	})
+	nc = conn
+
+	registryService = regsvc.RegistryService(
+		"test-gateway",
+		regsvc.WithNATS(conn),
+		regsvc.WithAggregate(),
+		regsvc.WithPersist(regsvc.PersistNever),
+	)
+	_ = registryService.LoadAll()
+	_ = registryService.Start()
+	t.Cleanup(func() { registryService.Stop() })
+
+	commandService = CommandService()
+	t.Cleanup(func() { commandService.Close() })
+
+	ResetGlobals()
+	// Re-register after reset
+	nc = conn
+	commandService = CommandService()
+	t.Cleanup(func() { commandService.Close() })
 }

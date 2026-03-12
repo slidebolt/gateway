@@ -353,9 +353,10 @@ func batchCreateCommands(items []types.BatchCommandItem) []types.BatchCommandRes
 			EntityID: item.EntityID,
 		}
 		params := map[string]any{
-			"device_id": item.DeviceID,
-			"entity_id": item.EntityID,
-			"payload":   item.Payload,
+			"command_id": nextID("gcmd"),
+			"device_id":  item.DeviceID,
+			"entity_id":  item.EntityID,
+			"payload":    item.Payload,
 		}
 		resp := routeRPC(item.PluginID, "entities/commands/create", params)
 		if resp.Error != nil {

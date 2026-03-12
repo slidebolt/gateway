@@ -1,24 +1,32 @@
-package main
+package history
 
 import (
+	"fmt"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/slidebolt/sdk-types"
 )
 
-// TestHistoryStore_InsertAndRetrieveEvent tests event persistence
-func TestHistoryStore_InsertAndRetrieveEvent(t *testing.T) {
-	config := NewTestConfig(t)
-	defer config.Cleanup()
-
-	store, err := openHistoryStore(config.SQLitePath)
+func openTestStore(t *testing.T) *History {
+	t.Helper()
+	dir := t.TempDir()
+	h, err := Open(filepath.Join(dir, "test.db"))
 	if err != nil {
 		t.Fatalf("Failed to open history store: %v", err)
 	}
-	defer store.Close()
+	t.Cleanup(func() {
+		h.Close()
+		os.RemoveAll(dir)
+	})
+	return h
+}
 
-	// Insert event
+func TestHistoryStore_InsertAndRetrieveEvent(t *testing.T) {
+	store := openTestStore(t)
+
 	env := types.EntityEventEnvelope{
 		PluginID: "test-plugin",
 		DeviceID: "device-1",
@@ -26,13 +34,11 @@ func TestHistoryStore_InsertAndRetrieveEvent(t *testing.T) {
 		Payload:  []byte(`{"type":"state","on":true}`),
 	}
 
-	err = store.InsertEvent(1, time.Now().UTC(), env)
-	if err != nil {
+	if err := store.insertEvent(1, time.Now().UTC(), env); err != nil {
 		t.Fatalf("Failed to insert event: %v", err)
 	}
 
-	// Retrieve events
-	events, err := store.ListEvents("test-plugin", "device-1", "entity-1", 100)
+	events, err := store.listEvents("test-plugin", "device-1", "entity-1", 100)
 	if err != nil {
 		t.Fatalf("Failed to list events: %v", err)
 	}
@@ -46,16 +52,8 @@ func TestHistoryStore_InsertAndRetrieveEvent(t *testing.T) {
 	}
 }
 
-// TestHistoryStore_InsertCommandStatus tests command status persistence
 func TestHistoryStore_InsertCommandStatus(t *testing.T) {
-	config := NewTestConfig(t)
-	defer config.Cleanup()
-
-	store, err := openHistoryStore(config.SQLitePath)
-	if err != nil {
-		t.Fatalf("Failed to open history store: %v", err)
-	}
-	defer store.Close()
+	store := openTestStore(t)
 
 	status := types.CommandStatus{
 		CommandID:     "cmd-123",
@@ -67,13 +65,11 @@ func TestHistoryStore_InsertCommandStatus(t *testing.T) {
 		LastUpdatedAt: time.Now().UTC(),
 	}
 
-	err = store.InsertCommandStatus(1, status)
-	if err != nil {
+	if err := store.insertCommandStatus(1, status); err != nil {
 		t.Fatalf("Failed to insert command status: %v", err)
 	}
 
-	// Retrieve latest status
-	latest, found, err := store.LatestCommandStatus("cmd-123")
+	latest, found, err := store.latestCommandStatus("cmd-123")
 	if err != nil {
 		t.Fatalf("Failed to get latest command status: %v", err)
 	}
@@ -91,18 +87,10 @@ func TestHistoryStore_InsertCommandStatus(t *testing.T) {
 	}
 }
 
-// TestHistoryStore_LatestCommandStatus_NotFound tests when command doesn't exist
 func TestHistoryStore_LatestCommandStatus_NotFound(t *testing.T) {
-	config := NewTestConfig(t)
-	defer config.Cleanup()
+	store := openTestStore(t)
 
-	store, err := openHistoryStore(config.SQLitePath)
-	if err != nil {
-		t.Fatalf("Failed to open history store: %v", err)
-	}
-	defer store.Close()
-
-	_, found, err := store.LatestCommandStatus("nonexistent-cmd")
+	_, found, err := store.latestCommandStatus("nonexistent-cmd")
 	if err != nil {
 		t.Fatalf("Failed to query command status: %v", err)
 	}
@@ -112,18 +100,9 @@ func TestHistoryStore_LatestCommandStatus_NotFound(t *testing.T) {
 	}
 }
 
-// TestHistoryStore_ListEvents_Limit tests pagination
 func TestHistoryStore_ListEvents_Limit(t *testing.T) {
-	config := NewTestConfig(t)
-	defer config.Cleanup()
+	store := openTestStore(t)
 
-	store, err := openHistoryStore(config.SQLitePath)
-	if err != nil {
-		t.Fatalf("Failed to open history store: %v", err)
-	}
-	defer store.Close()
-
-	// Insert multiple events
 	now := time.Now().UTC()
 	for i := 0; i < 10; i++ {
 		env := types.EntityEventEnvelope{
@@ -132,11 +111,10 @@ func TestHistoryStore_ListEvents_Limit(t *testing.T) {
 			EntityID: "entity-1",
 			Payload:  []byte(`{"type":"state"}`),
 		}
-		store.InsertEvent(uint64(i+1), now.Add(time.Duration(i)*time.Second), env)
+		store.insertEvent(uint64(i+1), now.Add(time.Duration(i)*time.Second), env)
 	}
 
-	// Query with limit
-	events, err := store.ListEvents("test-plugin", "device-1", "entity-1", 5)
+	events, err := store.listEvents("test-plugin", "device-1", "entity-1", 5)
 	if err != nil {
 		t.Fatalf("Failed to list events: %v", err)
 	}
@@ -146,18 +124,9 @@ func TestHistoryStore_ListEvents_Limit(t *testing.T) {
 	}
 }
 
-// TestHistoryStore_Stats tests statistics calculation
 func TestHistoryStore_Stats(t *testing.T) {
-	config := NewTestConfig(t)
-	defer config.Cleanup()
+	store := openTestStore(t)
 
-	store, err := openHistoryStore(config.SQLitePath)
-	if err != nil {
-		t.Fatalf("Failed to open history store: %v", err)
-	}
-	defer store.Close()
-
-	// Insert events and commands
 	now := time.Now().UTC()
 	for i := 0; i < 10; i++ {
 		env := types.EntityEventEnvelope{
@@ -166,12 +135,12 @@ func TestHistoryStore_Stats(t *testing.T) {
 			EntityID: "entity-1",
 			Payload:  []byte(`{"type":"state"}`),
 		}
-		store.InsertEvent(uint64(i+1), now, env)
+		store.insertEvent(uint64(i+1), now, env)
 	}
 
 	for i := 0; i < 5; i++ {
 		status := types.CommandStatus{
-			CommandID:     nextID("cmd"),
+			CommandID:     fmt.Sprintf("cmd-%d", i),
 			PluginID:      "test-plugin",
 			DeviceID:      "device-1",
 			EntityID:      "entity-1",
@@ -179,35 +148,26 @@ func TestHistoryStore_Stats(t *testing.T) {
 			CreatedAt:     now,
 			LastUpdatedAt: now,
 		}
-		store.InsertCommandStatus(uint64(i+100), status)
+		store.insertCommandStatus(uint64(i+100), status)
 	}
 
-	stats, err := store.Stats()
+	s, err := store.stats()
 	if err != nil {
 		t.Fatalf("Failed to get stats: %v", err)
 	}
 
-	if stats.EventCount != 10 {
-		t.Errorf("Expected 10 events, got %d", stats.EventCount)
+	if s.EventCount != 10 {
+		t.Errorf("Expected 10 events, got %d", s.EventCount)
 	}
 
-	if stats.CommandCount != 5 {
-		t.Errorf("Expected 5 commands, got %d", stats.CommandCount)
+	if s.CommandCount != 5 {
+		t.Errorf("Expected 5 commands, got %d", s.CommandCount)
 	}
 }
 
-// TestHistoryStore_PluginRates tests rate calculation for plugins
 func TestHistoryStore_PluginRates(t *testing.T) {
-	config := NewTestConfig(t)
-	defer config.Cleanup()
+	store := openTestStore(t)
 
-	store, err := openHistoryStore(config.SQLitePath)
-	if err != nil {
-		t.Fatalf("Failed to open history store: %v", err)
-	}
-	defer store.Close()
-
-	// Insert 60 events over 60 seconds
 	now := time.Now().UTC()
 	for i := 0; i < 60; i++ {
 		env := types.EntityEventEnvelope{
@@ -217,10 +177,10 @@ func TestHistoryStore_PluginRates(t *testing.T) {
 			Payload:  []byte(`{"type":"state"}`),
 		}
 		ts := now.Add(time.Duration(-i) * time.Second)
-		store.InsertEvent(uint64(i+1), ts, env)
+		store.insertEvent(uint64(i+1), ts, env)
 	}
 
-	rates, err := store.PluginRates(60)
+	rates, err := store.pluginRates(60)
 	if err != nil {
 		t.Fatalf("Failed to get plugin rates: %v", err)
 	}
@@ -229,7 +189,6 @@ func TestHistoryStore_PluginRates(t *testing.T) {
 		t.Fatalf("Expected 1 plugin rate entry, got %d", len(rates))
 	}
 
-	// Rate should be approximately 1.0 events/sec
 	if rates[0].EventsPerSec < 0.9 || rates[0].EventsPerSec > 1.1 {
 		t.Errorf("Expected rate ~1.0, got %f", rates[0].EventsPerSec)
 	}
@@ -239,18 +198,9 @@ func TestHistoryStore_PluginRates(t *testing.T) {
 	}
 }
 
-// TestHistoryStore_DeviceRates tests rate calculation for devices
 func TestHistoryStore_DeviceRates(t *testing.T) {
-	config := NewTestConfig(t)
-	defer config.Cleanup()
+	store := openTestStore(t)
 
-	store, err := openHistoryStore(config.SQLitePath)
-	if err != nil {
-		t.Fatalf("Failed to open history store: %v", err)
-	}
-	defer store.Close()
-
-	// Insert events for multiple devices
 	now := time.Now().UTC()
 	for i := 0; i < 30; i++ {
 		env := types.EntityEventEnvelope{
@@ -260,7 +210,7 @@ func TestHistoryStore_DeviceRates(t *testing.T) {
 			Payload:  []byte(`{"type":"state"}`),
 		}
 		ts := now.Add(time.Duration(-i) * time.Second)
-		store.InsertEvent(uint64(i+1), ts, env)
+		store.insertEvent(uint64(i+1), ts, env)
 	}
 
 	for i := 0; i < 30; i++ {
@@ -271,10 +221,10 @@ func TestHistoryStore_DeviceRates(t *testing.T) {
 			Payload:  []byte(`{"type":"state"}`),
 		}
 		ts := now.Add(time.Duration(-i) * time.Second)
-		store.InsertEvent(uint64(i+100), ts, env)
+		store.insertEvent(uint64(i+100), ts, env)
 	}
 
-	rates, err := store.DeviceRates("test-plugin", 60)
+	rates, err := store.deviceRates("test-plugin", 60)
 	if err != nil {
 		t.Fatalf("Failed to get device rates: %v", err)
 	}
@@ -284,18 +234,9 @@ func TestHistoryStore_DeviceRates(t *testing.T) {
 	}
 }
 
-// TestHistoryStore_EntityRates tests rate calculation for entities
 func TestHistoryStore_EntityRates(t *testing.T) {
-	config := NewTestConfig(t)
-	defer config.Cleanup()
+	store := openTestStore(t)
 
-	store, err := openHistoryStore(config.SQLitePath)
-	if err != nil {
-		t.Fatalf("Failed to open history store: %v", err)
-	}
-	defer store.Close()
-
-	// Insert events for multiple entities
 	now := time.Now().UTC()
 	for i := 0; i < 20; i++ {
 		env := types.EntityEventEnvelope{
@@ -305,7 +246,7 @@ func TestHistoryStore_EntityRates(t *testing.T) {
 			Payload:  []byte(`{"type":"state"}`),
 		}
 		ts := now.Add(time.Duration(-i) * time.Second)
-		store.InsertEvent(uint64(i+1), ts, env)
+		store.insertEvent(uint64(i+1), ts, env)
 	}
 
 	for i := 0; i < 20; i++ {
@@ -316,10 +257,10 @@ func TestHistoryStore_EntityRates(t *testing.T) {
 			Payload:  []byte(`{"type":"state"}`),
 		}
 		ts := now.Add(time.Duration(-i) * time.Second)
-		store.InsertEvent(uint64(i+100), ts, env)
+		store.insertEvent(uint64(i+100), ts, env)
 	}
 
-	rates, err := store.EntityRates("test-plugin", "device-1", 60)
+	rates, err := store.entityRates("test-plugin", "device-1", 60)
 	if err != nil {
 		t.Fatalf("Failed to get entity rates: %v", err)
 	}
@@ -329,20 +270,11 @@ func TestHistoryStore_EntityRates(t *testing.T) {
 	}
 }
 
-// TestHistoryStore_ConcurrentAccess tests concurrent read/write
 func TestHistoryStore_ConcurrentAccess(t *testing.T) {
-	config := NewTestConfig(t)
-	defer config.Cleanup()
-
-	store, err := openHistoryStore(config.SQLitePath)
-	if err != nil {
-		t.Fatalf("Failed to open history store: %v", err)
-	}
-	defer store.Close()
+	store := openTestStore(t)
 
 	done := make(chan bool)
 
-	// Writer goroutines
 	for i := 0; i < 5; i++ {
 		go func(id int) {
 			for j := 0; j < 20; j++ {
@@ -352,30 +284,27 @@ func TestHistoryStore_ConcurrentAccess(t *testing.T) {
 					EntityID: "entity-1",
 					Payload:  []byte(`{"type":"state"}`),
 				}
-				store.InsertEvent(uint64(id*100+j), time.Now().UTC(), env)
+				store.insertEvent(uint64(id*100+j), time.Now().UTC(), env)
 			}
 			done <- true
 		}(i)
 	}
 
-	// Reader goroutines
 	for i := 0; i < 5; i++ {
 		go func() {
 			for j := 0; j < 20; j++ {
-				store.ListEvents("test-plugin", "device-1", "entity-1", 100)
+				store.listEvents("test-plugin", "device-1", "entity-1", 100)
 			}
 			done <- true
 		}()
 	}
 
-	// Wait for all goroutines
 	for i := 0; i < 10; i++ {
 		<-done
 	}
 
-	// Verify all events were inserted
-	stats, _ := store.Stats()
-	if stats.EventCount != 100 {
-		t.Errorf("Expected 100 events after concurrent writes, got %d", stats.EventCount)
+	s, _ := store.stats()
+	if s.EventCount != 100 {
+		t.Errorf("Expected 100 events after concurrent writes, got %d", s.EventCount)
 	}
 }

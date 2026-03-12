@@ -4,17 +4,25 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	regsvc "github.com/slidebolt/registry"
 	"github.com/slidebolt/sdk-types"
 )
 
 func routeRPC(pluginID, method string, params any) types.Response {
+	started := time.Now()
+	traceRPC := method == "entities/commands/create" || method == "commands/status/get" || method == "entities/list"
+	if traceRPC {
+		log.Printf("gateway virtual-cmd: rpc start plugin=%s method=%s", pluginID, method)
+	}
 	regMu.RLock()
 	record, exists := registry[pluginID]
 	regMu.RUnlock()
 	if !exists {
+		log.Printf("gateway rpc: plugin not registered plugin=%s method=%s", pluginID, method)
 		return types.Response{JSONRPC: types.JSONRPCVersion, Error: &types.RPCError{Code: -32000, Message: "plugin not registered"}}
 	}
 	reg := record.Registration
@@ -24,11 +32,19 @@ func routeRPC(pluginID, method string, params any) types.Response {
 	data, _ := json.Marshal(req)
 	msg, err := nc.Request(reg.RPCSubject, data, 2*time.Second)
 	if err != nil {
+		log.Printf("gateway rpc: timeout plugin=%s method=%s duration_ms=%d err=%v", pluginID, method, time.Since(started).Milliseconds(), err)
 		return types.Response{JSONRPC: types.JSONRPCVersion, Error: &types.RPCError{Code: -32000, Message: "plugin timeout"}}
 	}
 	var resp types.Response
 	if err := json.Unmarshal(msg.Data, &resp); err != nil {
+		log.Printf("gateway rpc: malformed response plugin=%s method=%s duration_ms=%d err=%v", pluginID, method, time.Since(started).Milliseconds(), err)
 		return types.Response{JSONRPC: types.JSONRPCVersion, Error: &types.RPCError{Code: -32700, Message: "malformed response from plugin"}}
+	}
+	if resp.Error != nil {
+		log.Printf("gateway rpc: plugin returned error plugin=%s method=%s duration_ms=%d code=%d msg=%q", pluginID, method, time.Since(started).Milliseconds(), resp.Error.Code, resp.Error.Message)
+	}
+	if traceRPC && resp.Error == nil {
+		log.Printf("gateway virtual-cmd: rpc ok plugin=%s method=%s duration_ms=%d", pluginID, method, time.Since(started).Milliseconds())
 	}
 	return resp
 }
@@ -56,7 +72,27 @@ func parseDevices(resp types.Response) ([]types.Device, error) {
 }
 
 func findEntity(pluginID, deviceID, entityID string) (types.Entity, error) {
-	resp := routeRPC(pluginID, "entities/list", gin.H{"device_id": deviceID})
+	if registryService != nil {
+		results, err := regsvc.QueryService(registryService).System().FindEntities(regsvc.Filter{
+			PluginID: pluginID,
+			DeviceID: deviceID,
+			EntityID: entityID,
+			Limit:    1,
+		})
+		if err == nil {
+			for _, rec := range results {
+				if rec.PluginID == pluginID && rec.Entity.ID == entityID {
+					ent := rec.Entity
+					if ent.DeviceID == "" {
+						ent.DeviceID = deviceID
+					}
+					return ent, nil
+				}
+			}
+		}
+	}
+
+	resp := routeRPC(pluginID, types.RPCMethodEntitiesList, gin.H{"device_id": deviceID})
 	entities, err := parseEntities(resp)
 	if err != nil {
 		return types.Entity{}, err
@@ -70,7 +106,22 @@ func findEntity(pluginID, deviceID, entityID string) (types.Entity, error) {
 }
 
 func findDevice(pluginID, deviceID string) (types.Device, error) {
-	resp := routeRPC(pluginID, "devices/list", nil)
+	if registryService != nil {
+		results, err := regsvc.QueryService(registryService).System().FindDevices(regsvc.Filter{
+			PluginID: pluginID,
+			DeviceID: deviceID,
+			Limit:    1,
+		})
+		if err == nil {
+			for _, rec := range results {
+				if rec.PluginID == pluginID && rec.Device.ID == deviceID {
+					return rec.Device, nil
+				}
+			}
+		}
+	}
+
+	resp := routeRPC(pluginID, types.RPCMethodDevicesList, nil)
 	devices, err := parseDevices(resp)
 	if err != nil {
 		return types.Device{}, err
@@ -84,7 +135,7 @@ func findDevice(pluginID, deviceID string) (types.Device, error) {
 }
 
 func fetchCommandStatus(pluginID, commandID string) (types.CommandStatus, error) {
-	resp := routeRPC(pluginID, "commands/status/get", gin.H{"command_id": commandID})
+	resp := routeRPC(pluginID, types.RPCMethodCommandsStatusGet, gin.H{"command_id": commandID})
 	if resp.Error != nil {
 		return types.CommandStatus{}, errors.New(resp.Error.Message)
 	}
@@ -93,16 +144,6 @@ func fetchCommandStatus(pluginID, commandID string) (types.CommandStatus, error)
 		return types.CommandStatus{}, err
 	}
 	return st, nil
-}
-
-func fetchAnyCommandStatus(pluginID, commandID string) (types.CommandStatus, error) {
-	vstore.mu.RLock()
-	if rec, ok := vstore.commands[commandID]; ok {
-		vstore.mu.RUnlock()
-		return rec.Status, nil
-	}
-	vstore.mu.RUnlock()
-	return fetchCommandStatus(pluginID, commandID)
 }
 
 func parseActionType(payload json.RawMessage) (string, error) {
