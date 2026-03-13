@@ -37,6 +37,13 @@ type PruneOutput struct {
 
 type ListPluginsOutput struct{ Body map[string]types.Registration }
 
+type SystemStatsOutput struct {
+	Body struct {
+		TotalDevices  int `json:"total_devices"`
+		TotalEntities int `json:"total_entities"`
+	}
+}
+
 func registerSystemRoutes(api huma.API) {
 	huma.Register(api, huma.Operation{
 		OperationID: "health-check",
@@ -210,5 +217,21 @@ func registerSystemRoutes(api huma.API) {
 		res := &PruneOutput{}
 		res.Body.Message = "History, NATS streams, and logs have been cleared."
 		return res, nil
+	})
+
+	huma.Register(api, huma.Operation{
+		OperationID: "system-stats",
+		Method:      http.MethodGet,
+		Path:        "/api/system/stats",
+		Summary:     "System Stats",
+		Description: "Returns aggregate counts of devices and entities known to the gateway across all registered plugins.",
+		Tags:        []string{"system"},
+	}, func(ctx context.Context, input *struct{}) (*SystemStatsOutput, error) {
+		devices := registryService.FindDevices(types.SearchQuery{})
+		entities := registryService.FindEntities(types.SearchQuery{})
+		out := &SystemStatsOutput{}
+		out.Body.TotalDevices = len(devices)
+		out.Body.TotalEntities = len(entities)
+		return out, nil
 	})
 }

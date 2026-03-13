@@ -23,9 +23,10 @@ var (
 	registry               = make(map[string]pluginRecord)
 	regMu           sync.RWMutex
 	gatewayRT       gatewayRuntimeInfo
-	registryService *regsvc.Registry
-	commandService  *Command
-	gatewayDataDir  string
+	registryService     *regsvc.Registry
+	commandService      *Command
+	dynamicEventService *DynamicEventService
+	gatewayDataDir      string
 )
 
 type gatewayRuntimeInfo struct {

@@ -94,9 +94,14 @@ func registerEntityRoutes(api huma.API) {
 		resp := routeRPC(input.PluginID, "entities/list", map[string]string{"device_id": input.DeviceID})
 		entities, err := parseEntities(resp)
 		if err != nil {
+			// If the device has an EntityQuery, return query results even when the
+			// plugin RPC fails (e.g. gateway-owned or pure-query device).
+			if dev, ok := registryService.LoadDevice(input.DeviceID); ok && dev.EntityQuery != nil {
+				return &ListEntitiesOutput{Body: withSchema(augmentWithEntityQuery(input.DeviceID, nil))}, nil
+			}
 			return nil, pluginErr(err.Error())
 		}
-		return &ListEntitiesOutput{Body: withSchema(entities)}, nil
+		return &ListEntitiesOutput{Body: withSchema(augmentWithEntityQuery(input.DeviceID, entities))}, nil
 	})
 
 	huma.Register(api, huma.Operation{
@@ -205,7 +210,7 @@ func registerEntityRoutes(api huma.API) {
 		if resp.Error != nil {
 			return nil, pluginErr(resp.Error.Message)
 		}
-		_ = registryService.DeleteEntity(input.DeviceID, input.EntityID)
+		_ = registryService.DeleteEntity(input.PluginID, input.DeviceID, input.EntityID)
 		return &DeleteOutput{Body: resp.Result}, nil
 	})
 
@@ -218,11 +223,14 @@ func registerEntityRoutes(api huma.API) {
 		Tags:        []string{"entities"},
 	}, func(ctx context.Context, input *GetEntityInput) (*GetEntityOutput, error) {
 		resp := routeRPC(input.PluginID, "entities/list", map[string]string{"device_id": input.DeviceID})
-		entities, err := parseEntities(resp)
-		if err != nil {
-			return nil, pluginErr(err.Error())
-		}
+		entities, _ := parseEntities(resp)
 		for _, e := range entities {
+			if e.ID == input.EntityID {
+				return &GetEntityOutput{Body: toEntityResponse(e)}, nil
+			}
+		}
+		// Fall through to EntityQuery results if not found via the plugin.
+		for _, e := range augmentWithEntityQuery(input.DeviceID, nil) {
 			if e.ID == input.EntityID {
 				return &GetEntityOutput{Body: toEntityResponse(e)}, nil
 			}

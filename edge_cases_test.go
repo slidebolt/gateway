@@ -69,19 +69,19 @@ func TestRegistryConcurrentAccess(t *testing.T) {
 // TestParseLabelsEdgeCases tests edge cases in label parsing
 func TestParseLabelsEdgeCases(t *testing.T) {
 	// Empty input
-	labels := parseLabels([]string{})
+	labels := types.ParseLabels([]string{})
 	if labels != nil {
 		t.Error("Expected nil for empty input")
 	}
 
 	// Missing colon
-	labels = parseLabels([]string{"nocolon"})
+	labels = types.ParseLabels([]string{"nocolon"})
 	if len(labels) != 0 {
 		t.Errorf("Expected 0 labels for 'nocolon', got %d", len(labels))
 	}
 
 	// Multiple colons - strings.Cut only splits on first
-	labels = parseLabels([]string{"key:val:ue"})
+	labels = types.ParseLabels([]string{"key:val:ue"})
 	if len(labels) != 1 || len(labels["key"]) != 1 {
 		t.Errorf("Expected 1 label with 1 value for multiple colons")
 	} else if labels["key"][0] != "val:ue" {
@@ -89,7 +89,7 @@ func TestParseLabelsEdgeCases(t *testing.T) {
 	}
 
 	// Empty key or value
-	labels = parseLabels([]string{":value", "key:", ":"})
+	labels = types.ParseLabels([]string{":value", "key:", ":"})
 	if len(labels) != 2 {
 		t.Logf("Labels with empty keys/values: %v", labels)
 	}
@@ -128,6 +128,6 @@ func BenchmarkParseLabels(b *testing.B) {
 	}
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_ = parseLabels(pairs)
+		_ = types.ParseLabels(pairs)
 	}
 }

@@ -36,6 +36,7 @@ func registerRoutes(api huma.API) {
 	registerSnapshotRoutes(api)
 	registerCommandRoutes(api)
 	registerEventRoutes(api)
+	registerEventSubscriptionRoutes(api)
 	registerSearchRoutes(api)
 	registerSchemaRoutes(api)
 	registerBatchRoutes(api)

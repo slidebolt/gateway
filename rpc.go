@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	regsvc "github.com/slidebolt/registry"
 	"github.com/slidebolt/sdk-types"
 )
 
@@ -73,23 +72,26 @@ func parseDevices(resp types.Response) ([]types.Device, error) {
 
 func findEntity(pluginID, deviceID, entityID string) (types.Entity, error) {
 	if registryService != nil {
-		results, err := regsvc.QueryService(registryService).System().FindEntities(regsvc.Filter{
+		results := registryService.FindEntities(types.SearchQuery{
 			PluginID: pluginID,
 			DeviceID: deviceID,
 			EntityID: entityID,
 			Limit:    1,
 		})
-		if err == nil {
-			for _, rec := range results {
-				if rec.PluginID == pluginID && rec.Entity.ID == entityID {
-					ent := rec.Entity
-					if ent.DeviceID == "" {
-						ent.DeviceID = deviceID
-					}
-					return ent, nil
+		for _, ent := range results {
+			if ent.PluginID == pluginID && ent.ID == entityID {
+				if ent.DeviceID == "" {
+					ent.DeviceID = deviceID
 				}
+				return ent, nil
 			}
 		}
+	}
+
+	// Gateway-owned entities exist only in the registry. Skip the NATS fallback
+	// to avoid a timeout waiting for a plugin that doesn't exist.
+	if isGatewayOwned(pluginID) {
+		return types.Entity{}, fmt.Errorf("entity not found")
 	}
 
 	resp := routeRPC(pluginID, types.RPCMethodEntitiesList, gin.H{"device_id": deviceID})
@@ -107,16 +109,14 @@ func findEntity(pluginID, deviceID, entityID string) (types.Entity, error) {
 
 func findDevice(pluginID, deviceID string) (types.Device, error) {
 	if registryService != nil {
-		results, err := regsvc.QueryService(registryService).System().FindDevices(regsvc.Filter{
+		results := registryService.FindDevices(types.SearchQuery{
 			PluginID: pluginID,
 			DeviceID: deviceID,
 			Limit:    1,
 		})
-		if err == nil {
-			for _, rec := range results {
-				if rec.PluginID == pluginID && rec.Device.ID == deviceID {
-					return rec.Device, nil
-				}
+		for _, dev := range results {
+			if dev.PluginID == pluginID && dev.ID == deviceID {
+				return dev, nil
 			}
 		}
 	}

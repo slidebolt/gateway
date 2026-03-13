@@ -3,6 +3,7 @@ module github.com/slidebolt/gateway
 go 1.25.7
 
 require (
+	github.com/cucumber/godog v0.15.1
 	github.com/danielgtaylor/huma/v2 v2.37.2
 	github.com/gin-gonic/gin v1.11.0
 	github.com/mark3labs/mcp-go v0.44.1
@@ -11,6 +12,7 @@ require (
 	github.com/slidebolt/registry v0.0.0-00010101000000-000000000000
 	github.com/slidebolt/sdk-types v1.20.3
 	github.com/swaggo/swag v1.16.6
+	github.com/yuin/gopher-lua v1.1.1
 	modernc.org/sqlite v1.39.0
 )
 
@@ -25,6 +27,8 @@ require (
 	github.com/bytedance/sonic v1.15.0 // indirect
 	github.com/bytedance/sonic/loader v0.5.0 // indirect
 	github.com/cloudwego/base64x v0.1.6 // indirect
+	github.com/cucumber/gherkin/go/v26 v26.2.0 // indirect
+	github.com/cucumber/messages/go/v21 v21.0.1 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/gabriel-vasile/mimetype v1.4.13 // indirect
 	github.com/gin-contrib/sse v1.1.0 // indirect
@@ -37,8 +41,12 @@ require (
 	github.com/go-playground/validator/v10 v10.30.1 // indirect
 	github.com/goccy/go-json v0.10.5 // indirect
 	github.com/goccy/go-yaml v1.19.2 // indirect
+	github.com/gofrs/uuid v4.3.1+incompatible // indirect
 	github.com/google/go-tpm v0.9.8 // indirect
 	github.com/google/uuid v1.6.0 // indirect
+	github.com/hashicorp/go-immutable-radix v1.3.1 // indirect
+	github.com/hashicorp/go-memdb v1.3.4 // indirect
+	github.com/hashicorp/golang-lru v0.5.4 // indirect
 	github.com/invopop/jsonschema v0.13.0 // indirect
 	github.com/josharian/intern v1.0.0 // indirect
 	github.com/json-iterator/go v1.1.12 // indirect
@@ -59,6 +67,7 @@ require (
 	github.com/quic-go/quic-go v0.59.0 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
 	github.com/spf13/cast v1.7.1 // indirect
+	github.com/spf13/pflag v1.0.10 // indirect
 	github.com/twitchyliquid64/golang-asm v0.15.1 // indirect
 	github.com/ugorji/go/codec v1.3.1 // indirect
 	github.com/wk8/go-ordered-map/v2 v2.1.8 // indirect
@@ -82,3 +91,5 @@ require (
 )
 
 replace github.com/slidebolt/registry => ../registry
+
+replace github.com/slidebolt/sdk-types => ../sdk-types

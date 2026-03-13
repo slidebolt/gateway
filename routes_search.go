@@ -14,7 +14,6 @@ import (
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/gin-gonic/gin"
 	"github.com/nats-io/nats.go"
-	regsvc "github.com/slidebolt/registry"
 	"github.com/slidebolt/sdk-types"
 )
 
@@ -43,7 +42,7 @@ type SearchEntitiesInput struct {
 	Domain   string   `query:"domain" doc:"Optional domain scope (e.g. light, switch)."`
 	Limit    int      `query:"limit" doc:"Optional max results; applied after aggregation."`
 }
-type SearchEntitiesOutput struct{ Body []entityWithPlugin }
+type SearchEntitiesOutput struct{ Body []types.Entity }
 
 func registerSearchRoutes(api huma.API) {
 	huma.Register(api, huma.Operation{
@@ -75,23 +74,15 @@ func registerSearchRoutes(api huma.API) {
 			rawLabels = input.Labels
 		}
 
-		f := regsvc.Filter{
+		f := types.SearchQuery{
 			Pattern:  pattern,
-			Labels:   parseLabels(rawLabels),
+			Labels:   types.ParseLabels(rawLabels),
 			PluginID: strings.TrimSpace(input.PluginID),
 			DeviceID: strings.TrimSpace(input.DeviceID),
 			Limit:    input.Limit,
 		}
-		records, err := regsvc.QueryService(registryService).System().FindDevices(f)
-		if err != nil {
-			return &SearchDevicesOutput{Body: []types.Device{}}, nil
-		}
-		results := make([]types.Device, 0, len(records))
-		for _, rec := range records {
-			results = append(results, rec.Device)
-		}
-
-		return &SearchDevicesOutput{Body: results}, nil
+		devices := registryService.FindDevices(f)
+		return &SearchDevicesOutput{Body: devices}, nil
 	})
 
 	huma.Register(api, huma.Operation{
@@ -116,7 +107,7 @@ func registerSearchRoutes(api huma.API) {
 
 		query := types.SearchQuery{
 			Pattern:  pattern,
-			Labels:   parseLabels(rawLabels),
+			Labels:   types.ParseLabels(rawLabels),
 			PluginID: strings.TrimSpace(input.PluginID),
 			DeviceID: strings.TrimSpace(input.DeviceID),
 			EntityID: strings.TrimSpace(input.EntityID),
@@ -201,7 +192,7 @@ func startNATSDiscoveryBridge() {
 
 		query := types.SearchQuery{
 			Pattern:  pattern,
-			Labels:   parseLabels(q["label"]),
+			Labels:   types.ParseLabels(q["label"]),
 			PluginID: strings.TrimSpace(q.Get("plugin_id")),
 			DeviceID: strings.TrimSpace(q.Get("device_id")),
 			EntityID: strings.TrimSpace(q.Get("entity_id")),

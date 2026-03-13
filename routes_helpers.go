@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"strings"
 
-	regsvc "github.com/slidebolt/registry"
 	"github.com/slidebolt/sdk-types"
 )
 
@@ -75,32 +74,50 @@ func filterDescriptor(desc types.DomainDescriptor, actions []string) types.Domai
 	return filtered
 }
 
-func parseLabels(pairs []string) map[string][]string {
-	if len(pairs) == 0 {
-		return nil
-	}
-	labels := make(map[string][]string, len(pairs))
-	for _, p := range pairs {
-		k, v, ok := strings.Cut(p, ":")
-		if ok {
-			labels[k] = append(labels[k], v)
-		}
-	}
-	return labels
-}
-
 func saveDeviceToRegistry(raw json.RawMessage, fallback types.Device) {
 	if registryService == nil {
 		return
 	}
 	var dev types.Device
 	if len(raw) > 0 && json.Unmarshal(raw, &dev) == nil && strings.TrimSpace(dev.ID) != "" {
+		// Preserve gateway-managed fields not returned by the plugin.
+		if dev.EntityQuery == nil {
+			dev.EntityQuery = fallback.EntityQuery
+		}
 		_ = registryService.SaveDevice(dev)
 		return
 	}
 	if strings.TrimSpace(fallback.ID) != "" {
 		_ = registryService.SaveDevice(fallback)
 	}
+}
+
+// augmentWithEntityQuery adds entities matching a device's EntityQuery to base,
+// deduplicating by entity ID. Returns base unchanged if the device has no
+// EntityQuery or cannot be found in the local registry.
+func augmentWithEntityQuery(deviceID string, base []types.Entity) []types.Entity {
+	if registryService == nil {
+		return base
+	}
+	dev, ok := registryService.LoadDevice(deviceID)
+	if !ok || dev.EntityQuery == nil {
+		return base
+	}
+	extra := performEntitySearch(*dev.EntityQuery)
+	if len(extra) == 0 {
+		return base
+	}
+	seen := make(map[string]bool, len(base))
+	for _, e := range base {
+		seen[e.ID] = true
+	}
+	for _, e := range extra {
+		if !seen[e.ID] {
+			seen[e.ID] = true
+			base = append(base, e)
+		}
+	}
+	return base
 }
 
 func saveEntityToRegistry(fallbackDeviceID string, raw json.RawMessage, fallback types.Entity) {
@@ -129,32 +146,6 @@ func saveEntityToRegistry(fallbackDeviceID string, raw json.RawMessage, fallback
 	_ = registryService.SaveEntity(fallback)
 }
 
-type entityWithPlugin struct {
-	types.Entity
-	PluginID string `json:"plugin_id"`
-}
-
-func performEntitySearch(query types.SearchQuery) []entityWithPlugin {
-	f := regsvc.Filter{
-		Pattern:  query.Pattern,
-		Labels:   query.Labels,
-		PluginID: query.PluginID,
-		DeviceID: query.DeviceID,
-		EntityID: query.EntityID,
-		Domain:   query.Domain,
-		Limit:    query.Limit,
-	}
-	registryResults, err := regsvc.QueryService(registryService).System().FindEntities(f)
-	if err != nil {
-		return nil
-	}
-
-	results := make([]entityWithPlugin, 0, len(registryResults))
-	for _, r := range registryResults {
-		results = append(results, entityWithPlugin{
-			Entity:   r.Entity,
-			PluginID: r.PluginID,
-		})
-	}
-	return results
+func performEntitySearch(query types.SearchQuery) []types.Entity {
+	return registryService.FindEntities(query)
 }

@@ -11,6 +11,11 @@ import (
 	"github.com/slidebolt/sdk-types"
 )
 
+// gatewayPluginID is the sentinel PluginID for gateway-owned entities (e.g. groups
+// with no backing hardware). Commands to these entities are handled entirely by the
+// fan-out logic; no NATS RPC is issued to any plugin.
+const gatewayPluginID = "__gateway__"
+
 var errCommandTargetNotFound = errors.New("entity not found")
 
 type commandTarget struct {
@@ -74,6 +79,9 @@ func publishCommandStatus(status types.CommandStatus) {
 	_ = nc.Publish(types.SubjectCommandStatus, data)
 }
 
+// Submit validates the target entity and queues a command for dispatch.
+// If the entity has a CommandQuery, the command fans out to all matching
+// entities (recursively, with cycle detection) on a single background goroutine.
 func (s *Command) Submit(pluginID, deviceID, entityID string, payload json.RawMessage) (types.CommandStatus, error) {
 	started := time.Now()
 
@@ -84,7 +92,13 @@ func (s *Command) Submit(pluginID, deviceID, entityID string, payload json.RawMe
 		return types.CommandStatus{}, fmt.Errorf("command service is closed")
 	}
 
-	entityType, err := s.resolver.ResolveEntityType(pluginID, deviceID, entityID)
+	// Extract the action type from the payload for pre-flight validation.
+	var cmd struct {
+		Type string `json:"type"`
+	}
+	_ = json.Unmarshal(payload, &cmd)
+
+	ent, err := s.resolver.ResolveEntity(pluginID, deviceID, entityID, cmd.Type)
 	if err != nil {
 		return types.CommandStatus{}, err
 	}
@@ -95,7 +109,7 @@ func (s *Command) Submit(pluginID, deviceID, entityID string, payload json.RawMe
 		PluginID:      pluginID,
 		DeviceID:      deviceID,
 		EntityID:      entityID,
-		EntityType:    entityType,
+		EntityType:    ent.Domain,
 		State:         types.CommandPending,
 		CreatedAt:     now,
 		LastUpdatedAt: now,
@@ -103,6 +117,33 @@ func (s *Command) Submit(pluginID, deviceID, entityID string, payload json.RawMe
 	log.Printf("gateway cmd: submit accepted command_id=%s owner=%s/%s/%s resolve_ms=%d", status.CommandID, pluginID, deviceID, entityID, time.Since(started).Milliseconds())
 
 	s.updateStatus(status)
+
+	if ent.CommandQuery != nil {
+		// Group entity: the entire fan-out tree runs on a single goroutine so the
+		// visited set is never touched concurrently (no races, no new goroutines
+		// spawned inside the tree).
+		go func() {
+			visited := map[string]bool{entityID: true}
+			s.fanOut(visited, *ent.CommandQuery, payload)
+
+			if isGatewayOwned(ent.PluginID) {
+				// Pure router — no plugin to notify; mark succeeded after fan-out.
+				status.State = types.CommandSucceeded
+				status.LastUpdatedAt = time.Now().UTC()
+				s.updateStatus(status)
+			} else {
+				// Owning plugin also receives the command so it can track its own state.
+				job := commandJob{
+					rootStatus: status,
+					payload:    payload,
+					target:     commandTarget{pluginID, deviceID, entityID},
+					onComplete: s.updateStatus,
+				}
+				s.dispatcher.Execute(job)
+			}
+		}()
+		return status, nil
+	}
 
 	job := commandJob{
 		rootStatus: status,
@@ -113,3 +154,73 @@ func (s *Command) Submit(pluginID, deviceID, entityID string, payload json.RawMe
 	go s.dispatcher.Execute(job)
 	return status, nil
 }
+
+// fanOut resolves all entities matching query and dispatches the payload to each,
+// skipping any entity already in visited (cycle detection). It runs synchronously
+// on the caller's goroutine so the visited map is never accessed concurrently.
+func (s *Command) fanOut(visited map[string]bool, query types.SearchQuery, payload json.RawMessage) {
+	entities := performEntitySearch(query)
+	for _, ent := range entities {
+		if visited[ent.ID] {
+			continue
+		}
+		visited[ent.ID] = true
+		s.dispatchFanOutEntity(visited, ent, payload)
+	}
+}
+
+// dispatchFanOutEntity handles a single entity during fan-out. If the entity is
+// itself a group it recurses synchronously before dispatching to its plugin.
+func (s *Command) dispatchFanOutEntity(visited map[string]bool, ent types.Entity, payload json.RawMessage) {
+	now := time.Now().UTC()
+	status := types.CommandStatus{
+		CommandID:     nextID("gcmd"),
+		PluginID:      ent.PluginID,
+		DeviceID:      ent.DeviceID,
+		EntityID:      ent.ID,
+		EntityType:    ent.Domain,
+		State:         types.CommandPending,
+		CreatedAt:     now,
+		LastUpdatedAt: now,
+	}
+	s.updateStatus(status)
+
+	if ent.CommandQuery != nil {
+		// Nested group: recurse synchronously (same goroutine, shared visited set).
+		s.fanOut(visited, *ent.CommandQuery, payload)
+
+		if isGatewayOwned(ent.PluginID) {
+			status.State = types.CommandSucceeded
+			status.LastUpdatedAt = time.Now().UTC()
+			s.updateStatus(status)
+		} else {
+			job := commandJob{
+				rootStatus: status,
+				payload:    payload,
+				target:     commandTarget{ent.PluginID, ent.DeviceID, ent.ID},
+				onComplete: s.updateStatus,
+			}
+			s.dispatcher.Execute(job)
+		}
+		return
+	}
+
+	if !isGatewayOwned(ent.PluginID) {
+		job := commandJob{
+			rootStatus: status,
+			payload:    payload,
+			target:     commandTarget{ent.PluginID, ent.DeviceID, ent.ID},
+			onComplete: s.updateStatus,
+		}
+		s.dispatcher.Execute(job)
+	} else {
+		log.Printf("gateway cmd: fan-out skipping gateway-owned leaf entity=%s (no plugin)", ent.ID)
+	}
+}
+
+// isGatewayOwned reports whether an entity is owned by the gateway itself
+// (no backing plugin on NATS).
+func isGatewayOwned(pluginID string) bool {
+	return pluginID == "" || pluginID == gatewayPluginID
+}
+

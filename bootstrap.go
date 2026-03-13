@@ -10,9 +10,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/danielgtaylor/huma/v2"
-	"github.com/danielgtaylor/huma/v2/adapters/humagin"
-	"github.com/gin-gonic/gin"
 	"github.com/nats-io/nats.go"
 	regsvc "github.com/slidebolt/registry"
 	"github.com/slidebolt/sdk-types"
@@ -123,33 +120,17 @@ func run() {
 	historyService.Start(historyCtx, nc, js)
 	startGatewayDiagnostics()
 
+	dynamicEventService = newDynamicEventService()
+	if err := dynamicEventService.Start(nc); err != nil {
+		log.Fatalf("Gateway: failed to start dynamic event service: %v", err)
+	}
+	defer dynamicEventService.Stop()
+
 	subscribeRegistry()
 	selfRegister(rpcSubject)
 	startDiscoveryProbe(historyCtx)
 
-	gin.SetMode(gin.ReleaseMode)
-	r := gin.New()
-	r.Use(requestLogger(), gin.Recovery())
-
-	config := huma.DefaultConfig("SlideBolt Gateway API", "1.0.0")
-	config.Info.Description = "REST API for managing plugins, devices, entities, scripts, commands, and events. " +
-		"Plugin-scoped routes proxy requests to the target plugin over NATS. " +
-		"Also available as an MCP server over stdio."
-
-	// Keep error responses as {"error": "message"} to match existing wire format.
-	huma.NewError = func(status int, msg string, errs ...error) huma.StatusError {
-		detail := msg
-		if len(errs) > 0 && errs[0] != nil && errs[0].Error() != "" {
-			detail = errs[0].Error()
-		}
-		return &apiError{status: status, Message: detail}
-	}
-
-	api := humagin.New(r, config)
-	registerRoutes(api)
-	historyService.RegisterRoutes(api)
-	r.GET("/api/topics/subscribe", historyService.SSEHandler())
-
+	r, humaAPI := buildRouter()
 	srv := &http.Server{
 		Addr:    apiHost + ":" + apiPort,
 		Handler: r,
@@ -163,7 +144,7 @@ func run() {
 
 	// MCP bridge over Stdio — tools are generated directly from the OpenAPI spec,
 	// so every REST route is automatically available to AI agents.
-	mcpBridge := gatewaymcp.New(api, "http://"+apiHost+":"+apiPort)
+	mcpBridge := gatewaymcp.New(humaAPI, "http://"+apiHost+":"+apiPort)
 	go mcpBridge.Serve()
 
 	waitForShutdownSignal()
