@@ -2,7 +2,7 @@ package main
 
 import (
 	"hash/fnv"
-	"log"
+	"log/slog"
 	"sort"
 	"sync"
 	"time"
@@ -91,7 +91,7 @@ func logDiskWriteSummary(stats map[string]diskWriteCounter) {
 		if s.writes == 0 {
 			continue
 		}
-		log.Printf("disk_write_summary: window=10s file=%s writes=%d bytes_written=%d unchanged_writes=%d", path, s.writes, s.bytesWritten, s.unchangedWrite)
+		slog.Debug("disk write summary", "window", "10s", "file", path, "writes", s.writes, "bytes_written", s.bytesWritten, "unchanged_writes", s.unchangedWrite)
 	}
 }
 

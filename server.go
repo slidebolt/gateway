@@ -14,6 +14,7 @@ func buildRouter() (*gin.Engine, huma.API) {
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
 	r.Use(requestLogger(), gin.Recovery())
+	ensureScriptRuntime()
 
 	config := huma.DefaultConfig("SlideBolt Gateway API", "1.0.0")
 	config.Info.Description = "REST API for managing plugins, devices, entities, scripts, commands, and events. " +

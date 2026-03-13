@@ -85,7 +85,7 @@ Feature: Group entities — command fan-out
   # Pass 5 — plugin-owned group
   # ---------------------------------------------------------------------------
 
-  Scenario: Plugin-owned group entity fans out and also dispatches to the plugin
+  Scenario: Plugin-owned group entity fans out to matching members
     Given a running plugin "hue" with devices:
       | id     | name      |
       | bridge | Hue Bridge |
@@ -99,4 +99,3 @@ Feature: Group entities — command fan-out
     When I send command "turn_on" to entity "hue-lounge" on plugin "hue" device "bridge"
     Then the response status is 202
     And all members with label "HueGroup:lounge" received command "turn_on"
-    And plugin "hue" received the command for entity "hue-lounge"

@@ -219,7 +219,7 @@ func registerDeviceRoutes(api huma.API) {
 		if resp.Error != nil {
 			return nil, pluginErr(resp.Error.Message)
 		}
-		saveDeviceToRegistry(resp.Result, input.Body)
+		saveDeviceToRegistry(input.PluginID, resp.Result, input.Body)
 		return &DeviceOutput{Body: resp.Result}, nil
 	})
 
@@ -235,7 +235,7 @@ func registerDeviceRoutes(api huma.API) {
 		if resp.Error != nil {
 			return nil, pluginErr(resp.Error.Message)
 		}
-		saveDeviceToRegistry(resp.Result, input.Body)
+		saveDeviceToRegistry(input.PluginID, resp.Result, input.Body)
 		historyService.BroadcastDevice(input.PluginID, input.Body.ID)
 		return &DeviceOutput{Body: resp.Result}, nil
 	})
@@ -257,7 +257,7 @@ func registerDeviceRoutes(api huma.API) {
 		if resp.Error != nil {
 			return nil, pluginErr(resp.Error.Message)
 		}
-		saveDeviceToRegistry(resp.Result, payload)
+		saveDeviceToRegistry(input.PluginID, resp.Result, payload)
 		historyService.BroadcastDevice(input.PluginID, input.DeviceID)
 		return &DeviceOutput{Body: resp.Result}, nil
 	})
@@ -278,7 +278,7 @@ func registerDeviceRoutes(api huma.API) {
 		if resp.Error != nil {
 			return nil, pluginErr(resp.Error.Message)
 		}
-		saveDeviceToRegistry(resp.Result, payload)
+		saveDeviceToRegistry(input.PluginID, resp.Result, payload)
 		historyService.BroadcastDevice(input.PluginID, input.DeviceID)
 		return &DeviceOutput{Body: resp.Result}, nil
 	})

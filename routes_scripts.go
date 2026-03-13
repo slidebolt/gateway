@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/danielgtaylor/huma/v2"
+	"github.com/slidebolt/sdk-types"
 )
 
 // --- Script types ---
@@ -66,7 +67,7 @@ func registerScriptRoutes(api huma.API) {
 		Tags:        []string{"scripts"},
 	}, func(ctx context.Context, input *GetScriptInput) (*ScriptOutput, error) {
 		params := map[string]string{"device_id": input.DeviceID, "entity_id": input.EntityID}
-		resp := routeRPC(input.PluginID, "scripts/get", params)
+		resp := routeRPC(input.PluginID, types.RPCMethodScriptsGet, params)
 		if resp.Error != nil {
 			if resp.Error.Code == -32004 || resp.Error.Code == -32005 {
 				return nil, notFoundErr(resp.Error.Message)
@@ -85,9 +86,14 @@ func registerScriptRoutes(api huma.API) {
 		Tags:        []string{"scripts"},
 	}, func(ctx context.Context, input *SetScriptInput) (*ScriptOutput, error) {
 		params := map[string]any{"device_id": input.DeviceID, "entity_id": input.EntityID, "source": input.Body.Source}
-		resp := routeRPC(input.PluginID, "scripts/put", params)
+		resp := routeRPC(input.PluginID, types.RPCMethodScriptsPut, params)
 		if resp.Error != nil {
 			return nil, pluginErr(resp.Error.Message)
+		}
+		if scriptRuntime != nil {
+			if err := scriptRuntime.Install(input.PluginID, input.DeviceID, input.EntityID, input.Body.Source); err != nil {
+				return nil, upstreamErr(err.Error())
+			}
 		}
 		return &ScriptOutput{Body: resp.Result}, nil
 	})
@@ -101,9 +107,12 @@ func registerScriptRoutes(api huma.API) {
 		Tags:        []string{"scripts"},
 	}, func(ctx context.Context, input *DeleteScriptInput) (*ScriptOutput, error) {
 		params := map[string]any{"device_id": input.DeviceID, "entity_id": input.EntityID, "purge_state": input.PurgeState}
-		resp := routeRPC(input.PluginID, "scripts/delete", params)
+		resp := routeRPC(input.PluginID, types.RPCMethodScriptsDelete, params)
 		if resp.Error != nil {
 			return nil, pluginErr(resp.Error.Message)
+		}
+		if scriptRuntime != nil {
+			scriptRuntime.Remove(input.PluginID, input.DeviceID, input.EntityID)
 		}
 		return &ScriptOutput{Body: resp.Result}, nil
 	})
@@ -117,7 +126,7 @@ func registerScriptRoutes(api huma.API) {
 		Tags:        []string{"scripts"},
 	}, func(ctx context.Context, input *GetScriptStateInput) (*ScriptStateOutput, error) {
 		params := map[string]string{"device_id": input.DeviceID, "entity_id": input.EntityID}
-		resp := routeRPC(input.PluginID, "scripts/state/get", params)
+		resp := routeRPC(input.PluginID, types.RPCMethodScriptStateGet, params)
 		if resp.Error != nil {
 			if resp.Error.Code == -32005 || strings.Contains(strings.ToLower(resp.Error.Message), "not found") {
 				return nil, notFoundErr(resp.Error.Message)
@@ -136,7 +145,7 @@ func registerScriptRoutes(api huma.API) {
 		Tags:        []string{"scripts"},
 	}, func(ctx context.Context, input *SetScriptStateInput) (*ScriptStateOutput, error) {
 		params := map[string]any{"device_id": input.DeviceID, "entity_id": input.EntityID, "state": input.Body.State}
-		resp := routeRPC(input.PluginID, "scripts/state/put", params)
+		resp := routeRPC(input.PluginID, types.RPCMethodScriptStatePut, params)
 		if resp.Error != nil {
 			return nil, pluginErr(resp.Error.Message)
 		}
@@ -152,7 +161,7 @@ func registerScriptRoutes(api huma.API) {
 		Tags:        []string{"scripts"},
 	}, func(ctx context.Context, input *DeleteScriptStateInput) (*ScriptStateOutput, error) {
 		params := map[string]string{"device_id": input.DeviceID, "entity_id": input.EntityID}
-		resp := routeRPC(input.PluginID, "scripts/state/delete", params)
+		resp := routeRPC(input.PluginID, types.RPCMethodScriptStateDelete, params)
 		if resp.Error != nil {
 			return nil, pluginErr(resp.Error.Message)
 		}

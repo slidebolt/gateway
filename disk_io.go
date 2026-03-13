@@ -3,7 +3,7 @@ package main
 import (
 	"io"
 	"io/fs"
-	"log"
+	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
@@ -22,69 +22,69 @@ type DiskIO interface {
 type OSDiskIO struct{}
 
 func (OSDiskIO) MkdirAll(path string, perm fs.FileMode) error {
-	log.Printf("disk write: mkdir path=%s perm=%#o", path, perm)
+	slog.Debug("disk write: mkdir", "path", path, "perm", perm)
 	err := os.MkdirAll(path, perm)
 	if err != nil {
-		log.Printf("disk write failed: mkdir path=%s err=%v", path, err)
+		slog.Debug("disk write failed: mkdir", "path", path, "error", err)
 		return err
 	}
-	log.Printf("disk write ok: mkdir path=%s", path)
+	slog.Debug("disk write ok: mkdir", "path", path)
 	return nil
 }
 
 func (OSDiskIO) ReadFile(path string) ([]byte, error) {
-	log.Printf("disk read: file path=%s", path)
+	slog.Debug("disk read: file", "path", path)
 	data, err := os.ReadFile(path)
 	if err != nil {
-		log.Printf("disk read failed: file path=%s err=%v", path, err)
+		slog.Debug("disk read failed: file", "path", path, "error", err)
 		return nil, err
 	}
-	log.Printf("disk read ok: file path=%s bytes=%d", path, len(data))
+	slog.Debug("disk read ok: file", "path", path, "bytes", len(data))
 	return data, nil
 }
 
 func (OSDiskIO) OpenRead(path string) (io.ReadCloser, error) {
-	log.Printf("disk read: open path=%s", path)
+	slog.Debug("disk read: open", "path", path)
 	f, err := os.Open(path)
 	if err != nil {
-		log.Printf("disk read failed: open path=%s err=%v", path, err)
+		slog.Debug("disk read failed: open", "path", path, "error", err)
 		return nil, err
 	}
-	log.Printf("disk read ok: open path=%s", path)
+	slog.Debug("disk read ok: open", "path", path)
 	return f, nil
 }
 
 func (OSDiskIO) ReadDir(path string) ([]fs.DirEntry, error) {
-	log.Printf("disk read: dir path=%s", path)
+	slog.Debug("disk read: dir", "path", path)
 	entries, err := os.ReadDir(path)
 	if err != nil {
-		log.Printf("disk read failed: dir path=%s err=%v", path, err)
+		slog.Debug("disk read failed: dir", "path", path, "error", err)
 		return nil, err
 	}
-	log.Printf("disk read ok: dir path=%s entries=%d", path, len(entries))
+	slog.Debug("disk read ok: dir", "path", path, "entries", len(entries))
 	return entries, nil
 }
 
 func (OSDiskIO) WriteFile(path string, data []byte, perm fs.FileMode) error {
-	log.Printf("disk write: file path=%s bytes=%d perm=%#o", path, len(data), perm)
+	slog.Debug("disk write: file", "path", path, "bytes", len(data), "perm", perm)
 	recordDiskWrite(path, data)
 	err := os.WriteFile(path, data, perm)
 	if err != nil {
-		log.Printf("disk write failed: file path=%s err=%v", path, err)
+		slog.Debug("disk write failed: file", "path", path, "error", err)
 		return err
 	}
-	log.Printf("disk write ok: file path=%s bytes=%d", path, len(data))
+	slog.Debug("disk write ok: file", "path", path, "bytes", len(data))
 	return nil
 }
 
 func (OSDiskIO) Truncate(path string, size int64) error {
-	log.Printf("disk write: truncate path=%s size=%d", path, size)
+	slog.Debug("disk write: truncate", "path", path, "size", size)
 	err := os.Truncate(path, size)
 	if err != nil {
-		log.Printf("disk write failed: truncate path=%s err=%v", path, err)
+		slog.Debug("disk write failed: truncate", "path", path, "error", err)
 		return err
 	}
-	log.Printf("disk write ok: truncate path=%s size=%d", path, size)
+	slog.Debug("disk write ok: truncate", "path", path, "size", size)
 	return nil
 }
 

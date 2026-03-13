@@ -4,8 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -25,16 +26,19 @@ func run() {
 	}
 	apiPort, err := requireEnv(types.EnvAPIPort)
 	if err != nil {
-		log.Fatal(err)
+		slog.Error("configuration error", "error", err)
+		os.Exit(1)
 	}
 	natsURL, err := requireEnv(types.EnvNATSURL)
 	if err != nil {
-		log.Fatal(err)
+		slog.Error("configuration error", "error", err)
+		os.Exit(1)
 	}
 	rpcSubject := getenv(types.EnvPluginRPCSbj)
 	dataDir, err := requireEnv(types.EnvPluginDataDir)
 	if err != nil {
-		log.Fatal(err)
+		slog.Error("configuration error", "error", err)
+		os.Exit(1)
 	}
 
 	gatewayDataDir = dataDir
@@ -43,11 +47,12 @@ func run() {
 	historyPath := filepath.Join(dataDir, "history.db")
 	historyService, err = history.Open(historyPath)
 	if err != nil {
-		log.Fatalf("Gateway: failed to open history store: %v", err)
+		slog.Error("failed to open history store", "error", err)
+		os.Exit(1)
 	}
 	defer func() {
 		if err := historyService.Close(); err != nil {
-			log.Printf("Gateway: history close error: %v", err)
+			slog.Warn("history close error", "error", err)
 		}
 	}()
 	gatewayRT = gatewayRuntimeInfo{NATSURL: natsURL, Version: getenv("APP_VERSION")}
@@ -58,17 +63,21 @@ func run() {
 	}
 	writeRuntimeDescriptor(apiHost, apiPort, natsURL, gatewayID)
 
+	slog.Info("gateway starting", "api_host", apiHost, "api_port", apiPort, "nats_url", natsURL)
+
 	for i := 0; i < 10; i++ {
 		nc, err = nats.Connect(natsURL)
 		if err == nil {
 			break
 		}
-		log.Printf("Gateway: NATS connect failed (attempt %d/10): %v", i+1, err)
+		slog.Warn("NATS connect failed", "attempt", i+1, "error", err)
 		time.Sleep(time.Second)
 	}
 	if err != nil {
-		log.Fatalf("Gateway: failed to connect to NATS after 10 attempts: %v", err)
+		slog.Error("failed to connect to NATS after 10 attempts", "error", err)
+		os.Exit(1)
 	}
+	slog.Info("NATS connected", "url", natsURL)
 	defer nc.Close()
 
 	registryService = regsvc.RegistryService(
@@ -78,14 +87,16 @@ func run() {
 		regsvc.WithPersist(regsvc.PersistNever),
 	)
 	if err := registryService.LoadAll(); err != nil {
-		log.Fatalf("Gateway: failed to load registry: %v", err)
+		slog.Error("failed to load registry", "error", err)
+		os.Exit(1)
 	}
 	if err := registryService.Start(); err != nil {
-		log.Fatalf("Gateway: failed to start registry: %v", err)
+		slog.Error("failed to start registry", "error", err)
+		os.Exit(1)
 	}
 	defer func() {
 		if err := registryService.Stop(); err != nil {
-			log.Printf("Gateway: registryService.Stop error: %v", err)
+			slog.Warn("registryService stop error", "error", err)
 		}
 	}()
 
@@ -93,7 +104,8 @@ func run() {
 
 	js, err = nc.JetStream()
 	if err != nil {
-		log.Fatalf("Gateway: failed to initialize JetStream: %v", err)
+		slog.Error("failed to initialize JetStream", "error", err)
+		os.Exit(1)
 	}
 
 	_, err = js.AddStream(&nats.StreamConfig{
@@ -103,7 +115,7 @@ func run() {
 		MaxMsgs:  5000,
 	})
 	if err != nil {
-		log.Printf("Warning: failed to add EVENTS stream: %v", err)
+		slog.Warn("failed to add EVENTS stream", "error", err)
 	}
 
 	_, err = js.AddStream(&nats.StreamConfig{
@@ -113,7 +125,7 @@ func run() {
 		MaxMsgs:  5000,
 	})
 	if err != nil {
-		log.Printf("Warning: failed to add COMMANDS stream: %v", err)
+		slog.Warn("failed to add COMMANDS stream", "error", err)
 	}
 
 	historyCtx, stopHistory := context.WithCancel(context.Background())
@@ -122,7 +134,8 @@ func run() {
 
 	dynamicEventService = newDynamicEventService()
 	if err := dynamicEventService.Start(nc); err != nil {
-		log.Fatalf("Gateway: failed to start dynamic event service: %v", err)
+		slog.Error("failed to start dynamic event service", "error", err)
+		os.Exit(1)
 	}
 	defer dynamicEventService.Stop()
 
@@ -138,7 +151,8 @@ func run() {
 
 	go func() {
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("listen: %s\n", err)
+			slog.Error("listen error", "error", err)
+			os.Exit(1)
 		}
 	}()
 
@@ -148,24 +162,24 @@ func run() {
 	go mcpBridge.Serve()
 
 	waitForShutdownSignal()
-	log.Println("Shutting down gateway...")
+	slog.Info("shutting down gateway")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	stopHistory()
 	if err := srv.Shutdown(ctx); err != nil {
-		log.Printf("Gateway shutdown error: %v", err)
+		slog.Warn("gateway shutdown error", "error", err)
 	}
 
 	_ = nc.Drain()
-	log.Println("Gateway exiting")
+	slog.Info("gateway exiting")
 }
 
 func subscribeRegistry() {
 	_, _ = nc.Subscribe(types.SubjectRegistration, func(m *nats.Msg) {
 		var reg types.Registration
 		if err := json.Unmarshal(m.Data, &reg); err != nil {
-			log.Printf("Gateway: failed to unmarshal registration: %v", err)
+			slog.Warn("failed to unmarshal registration", "error", err)
 			return
 		}
 
@@ -178,6 +192,7 @@ func subscribeRegistry() {
 			Valid:        true,
 		}
 		regMu.Unlock()
+		slog.Info("plugin registered", "plugin_id", reg.Manifest.ID)
 	})
 }
 
@@ -210,7 +225,7 @@ func selfRegister(rpcSubject string) {
 		}
 		data, _ := json.Marshal(resp)
 		if err := m.Respond(data); err != nil {
-			log.Printf("Gateway: failed to respond to message: %v", err)
+			slog.Warn("failed to respond to message", "error", err)
 		}
 	})
 

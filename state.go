@@ -16,16 +16,17 @@ type pluginRecord struct {
 }
 
 var (
-	nc              *nats.Conn
-	js              nats.JetStreamContext
-	historyService  *history.History
-	diskIO          DiskIO = OSDiskIO{}
-	registry               = make(map[string]pluginRecord)
-	regMu           sync.RWMutex
-	gatewayRT       gatewayRuntimeInfo
+	nc                  *nats.Conn
+	js                  nats.JetStreamContext
+	historyService      *history.History
+	diskIO              DiskIO = OSDiskIO{}
+	registry                   = make(map[string]pluginRecord)
+	regMu               sync.RWMutex
+	gatewayRT           gatewayRuntimeInfo
 	registryService     *regsvc.Registry
 	commandService      *Command
 	dynamicEventService *DynamicEventService
+	scriptRuntime       *scriptManager
 	gatewayDataDir      string
 )
 

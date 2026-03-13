@@ -133,7 +133,7 @@ func registerEntityRoutes(api huma.API) {
 		if resp.Error != nil {
 			return nil, pluginErr(resp.Error.Message)
 		}
-		saveEntityToRegistry(input.DeviceID, resp.Result, input.Body)
+		saveEntityToRegistry(input.PluginID, input.DeviceID, resp.Result, input.Body)
 		return &EntityOutput{Body: resp.Result}, nil
 	})
 
@@ -150,7 +150,7 @@ func registerEntityRoutes(api huma.API) {
 		if resp.Error != nil {
 			return nil, pluginErr(resp.Error.Message)
 		}
-		saveEntityToRegistry(input.DeviceID, resp.Result, input.Body)
+		saveEntityToRegistry(input.PluginID, input.DeviceID, resp.Result, input.Body)
 		return &EntityOutput{Body: resp.Result}, nil
 	})
 
@@ -171,7 +171,7 @@ func registerEntityRoutes(api huma.API) {
 		if resp.Error != nil {
 			return nil, pluginErr(resp.Error.Message)
 		}
-		saveEntityToRegistry(input.DeviceID, resp.Result, payload)
+		saveEntityToRegistry(input.PluginID, input.DeviceID, resp.Result, payload)
 		historyService.BroadcastEntity(input.PluginID, input.DeviceID, input.EntityID)
 		return &EntityOutput{Body: resp.Result}, nil
 	})
@@ -192,7 +192,7 @@ func registerEntityRoutes(api huma.API) {
 		if resp.Error != nil {
 			return nil, pluginErr(resp.Error.Message)
 		}
-		saveEntityToRegistry(input.DeviceID, resp.Result, payload)
+		saveEntityToRegistry(input.PluginID, input.DeviceID, resp.Result, payload)
 		historyService.BroadcastEntity(input.PluginID, input.DeviceID, input.EntityID)
 		return &EntityOutput{Body: resp.Result}, nil
 	})

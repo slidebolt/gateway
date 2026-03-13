@@ -9,8 +9,10 @@ require (
 	github.com/mark3labs/mcp-go v0.44.1
 	github.com/nats-io/nats-server/v2 v2.12.5
 	github.com/nats-io/nats.go v1.49.0
-	github.com/slidebolt/registry v0.0.0-00010101000000-000000000000
-	github.com/slidebolt/sdk-types v1.20.3
+	github.com/slidebolt/registry v0.0.1
+	github.com/slidebolt/sdk-entities v1.20.1
+	github.com/slidebolt/sdk-runner v1.20.3
+	github.com/slidebolt/sdk-types v1.20.4
 	github.com/swaggo/swag v1.16.6
 	github.com/yuin/gopher-lua v1.1.1
 	modernc.org/sqlite v1.39.0
@@ -66,6 +68,7 @@ require (
 	github.com/quic-go/qpack v0.6.0 // indirect
 	github.com/quic-go/quic-go v0.59.0 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
+	github.com/robfig/cron/v3 v3.0.1 // indirect
 	github.com/spf13/cast v1.7.1 // indirect
 	github.com/spf13/pflag v1.0.10 // indirect
 	github.com/twitchyliquid64/golang-asm v0.15.1 // indirect
@@ -89,7 +92,3 @@ require (
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.11.0 // indirect
 )
-
-replace github.com/slidebolt/registry => ../registry
-
-replace github.com/slidebolt/sdk-types => ../sdk-types

@@ -8,8 +8,8 @@ import (
 	"sync"
 	"time"
 
-	lua "github.com/yuin/gopher-lua"
 	"github.com/slidebolt/sdk-types"
+	lua "github.com/yuin/gopher-lua"
 )
 
 // ---------------------------------------------------------------------------
@@ -527,6 +527,13 @@ func luaToGo(v lua.LValue) any {
 	case lua.LString:
 		return string(x)
 	case *lua.LTable:
+		if isArrayTable(x) {
+			out := make([]any, 0, x.Len())
+			for i := 1; i <= x.Len(); i++ {
+				out = append(out, luaToGo(x.RawGetInt(i)))
+			}
+			return out
+		}
 		m := map[string]any{}
 		x.ForEach(func(k, val lua.LValue) {
 			m[k.String()] = luaToGo(val)
@@ -549,6 +556,20 @@ func goToLua(L *lua.LState, v any) lua.LValue {
 		return lua.LNumber(x)
 	case string:
 		return lua.LString(x)
+	case []any:
+		return sliceToTable(L, x)
+	case []int:
+		out := make([]any, 0, len(x))
+		for _, v := range x {
+			out = append(out, v)
+		}
+		return sliceToTable(L, out)
+	case []string:
+		out := make([]any, 0, len(x))
+		for _, v := range x {
+			out = append(out, v)
+		}
+		return sliceToTable(L, out)
 	case map[string]any:
 		return mapToTable(L, x)
 	default:
@@ -562,6 +583,38 @@ func mapToTable(L *lua.LState, m map[string]any) *lua.LTable {
 		L.SetField(t, k, goToLua(L, v))
 	}
 	return t
+}
+
+func sliceToTable(L *lua.LState, values []any) *lua.LTable {
+	t := L.NewTable()
+	for i, v := range values {
+		L.RawSetInt(t, i+1, goToLua(L, v))
+	}
+	return t
+}
+
+func isArrayTable(t *lua.LTable) bool {
+	if t.Len() == 0 {
+		return false
+	}
+	count := 0
+	arrayLike := true
+	t.ForEach(func(k, _ lua.LValue) {
+		count++
+		if !arrayLike {
+			return
+		}
+		n, ok := k.(lua.LNumber)
+		if !ok {
+			arrayLike = false
+			return
+		}
+		i := int(n)
+		if float64(n) != float64(i) || i < 1 || i > t.Len() {
+			arrayLike = false
+		}
+	})
+	return arrayLike && count == t.Len()
 }
 
 func entityToTable(L *lua.LState, e types.Entity) *lua.LTable {

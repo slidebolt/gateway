@@ -4,19 +4,22 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"sync"
 	"time"
 
 	"github.com/slidebolt/sdk-types"
 )
 
-// gatewayPluginID is the sentinel PluginID for gateway-owned entities (e.g. groups
-// with no backing hardware). Commands to these entities are handled entirely by the
-// fan-out logic; no NATS RPC is issued to any plugin.
+// gatewayPluginID is the sentinel PluginID for gateway-owned entities with no
+// backing hardware.
 const gatewayPluginID = "__gateway__"
 
 var errCommandTargetNotFound = errors.New("entity not found")
+
+func entityVisitKey(pluginID, deviceID, entityID string) string {
+	return pluginID + "\x00" + deviceID + "\x00" + entityID
+}
 
 type commandTarget struct {
 	PluginID string
@@ -114,33 +117,25 @@ func (s *Command) Submit(pluginID, deviceID, entityID string, payload json.RawMe
 		CreatedAt:     now,
 		LastUpdatedAt: now,
 	}
-	log.Printf("gateway cmd: submit accepted command_id=%s owner=%s/%s/%s resolve_ms=%d", status.CommandID, pluginID, deviceID, entityID, time.Since(started).Milliseconds())
+	slog.Info("submit accepted", "command_id", status.CommandID, "plugin_id", pluginID, "device_id", deviceID, "entity_id", entityID, "resolve_ms", time.Since(started).Milliseconds())
 
 	s.updateStatus(status)
+	if scriptRuntime != nil {
+		scriptRuntime.NotifyCommand(pluginID, deviceID, entityID, payload)
+	}
 
 	if ent.CommandQuery != nil {
-		// Group entity: the entire fan-out tree runs on a single goroutine so the
-		// visited set is never touched concurrently (no races, no new goroutines
-		// spawned inside the tree).
+		// Query-backed group entity: the entire fan-out tree runs on a single
+		// goroutine so the visited set is never touched concurrently (no races, no
+		// new goroutines spawned inside the tree). Group entities are virtual
+		// routers and can belong to any plugin; they do not receive an additional
+		// direct plugin RPC after fan-out.
 		go func() {
-			visited := map[string]bool{entityID: true}
+			visited := map[string]bool{entityVisitKey(pluginID, deviceID, entityID): true}
 			s.fanOut(visited, *ent.CommandQuery, payload)
-
-			if isGatewayOwned(ent.PluginID) {
-				// Pure router — no plugin to notify; mark succeeded after fan-out.
-				status.State = types.CommandSucceeded
-				status.LastUpdatedAt = time.Now().UTC()
-				s.updateStatus(status)
-			} else {
-				// Owning plugin also receives the command so it can track its own state.
-				job := commandJob{
-					rootStatus: status,
-					payload:    payload,
-					target:     commandTarget{pluginID, deviceID, entityID},
-					onComplete: s.updateStatus,
-				}
-				s.dispatcher.Execute(job)
-			}
+			status.State = types.CommandSucceeded
+			status.LastUpdatedAt = time.Now().UTC()
+			s.updateStatus(status)
 		}()
 		return status, nil
 	}
@@ -161,10 +156,11 @@ func (s *Command) Submit(pluginID, deviceID, entityID string, payload json.RawMe
 func (s *Command) fanOut(visited map[string]bool, query types.SearchQuery, payload json.RawMessage) {
 	entities := performEntitySearch(query)
 	for _, ent := range entities {
-		if visited[ent.ID] {
+		key := entityVisitKey(ent.PluginID, ent.DeviceID, ent.ID)
+		if visited[key] {
 			continue
 		}
-		visited[ent.ID] = true
+		visited[key] = true
 		s.dispatchFanOutEntity(visited, ent, payload)
 	}
 }
@@ -172,6 +168,12 @@ func (s *Command) fanOut(visited map[string]bool, query types.SearchQuery, paylo
 // dispatchFanOutEntity handles a single entity during fan-out. If the entity is
 // itself a group it recurses synchronously before dispatching to its plugin.
 func (s *Command) dispatchFanOutEntity(visited map[string]bool, ent types.Entity, payload json.RawMessage) {
+	action, err := parseActionType(payload)
+	if err == nil && ent.CommandQuery == nil && len(ent.Actions) > 0 && !containsAction(ent.Actions, action) {
+		slog.Debug("fan-out skipping unsupported leaf action", "plugin_id", ent.PluginID, "device_id", ent.DeviceID, "entity_id", ent.ID, "action", action)
+		return
+	}
+
 	now := time.Now().UTC()
 	status := types.CommandStatus{
 		CommandID:     nextID("gcmd"),
@@ -184,24 +186,17 @@ func (s *Command) dispatchFanOutEntity(visited map[string]bool, ent types.Entity
 		LastUpdatedAt: now,
 	}
 	s.updateStatus(status)
+	if scriptRuntime != nil {
+		scriptRuntime.NotifyCommand(ent.PluginID, ent.DeviceID, ent.ID, payload)
+	}
 
 	if ent.CommandQuery != nil {
-		// Nested group: recurse synchronously (same goroutine, shared visited set).
+		// Nested query-backed group: recurse synchronously (same goroutine, shared
+		// visited set), then mark the virtual group command complete.
 		s.fanOut(visited, *ent.CommandQuery, payload)
-
-		if isGatewayOwned(ent.PluginID) {
-			status.State = types.CommandSucceeded
-			status.LastUpdatedAt = time.Now().UTC()
-			s.updateStatus(status)
-		} else {
-			job := commandJob{
-				rootStatus: status,
-				payload:    payload,
-				target:     commandTarget{ent.PluginID, ent.DeviceID, ent.ID},
-				onComplete: s.updateStatus,
-			}
-			s.dispatcher.Execute(job)
-		}
+		status.State = types.CommandSucceeded
+		status.LastUpdatedAt = time.Now().UTC()
+		s.updateStatus(status)
 		return
 	}
 
@@ -214,7 +209,7 @@ func (s *Command) dispatchFanOutEntity(visited map[string]bool, ent types.Entity
 		}
 		s.dispatcher.Execute(job)
 	} else {
-		log.Printf("gateway cmd: fan-out skipping gateway-owned leaf entity=%s (no plugin)", ent.ID)
+		slog.Debug("fan-out skipping gateway-owned leaf", "entity_id", ent.ID)
 	}
 }
 
@@ -223,4 +218,3 @@ func (s *Command) dispatchFanOutEntity(visited map[string]bool, ent types.Entity
 func isGatewayOwned(pluginID string) bool {
 	return pluginID == "" || pluginID == gatewayPluginID
 }
-

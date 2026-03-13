@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"strings"
 
+	regsvc "github.com/slidebolt/registry"
 	"github.com/slidebolt/sdk-types"
 )
 
@@ -21,21 +22,23 @@ type EntityResponse struct {
 	Data         types.EntityData                `json:"data"`
 	Labels       map[string][]string             `json:"labels,omitempty"`
 	Snapshots    map[string]types.EntitySnapshot `json:"snapshots,omitempty"`
+	CommandQuery *types.SearchQuery              `json:"command_query,omitempty"`
 	DomainSchema *types.DomainDescriptor         `json:"schema,omitempty"`
 }
 
 func toEntityResponse(e types.Entity) EntityResponse {
 	r := EntityResponse{
-		ID:         e.ID,
-		SourceID:   e.SourceID,
-		SourceName: e.SourceName,
-		DeviceID:   e.DeviceID,
-		Domain:     e.Domain,
-		LocalName:  e.LocalName,
-		Actions:    e.Actions,
-		Data:       e.Data,
-		Labels:     e.Labels,
-		Snapshots:  e.Snapshots,
+		ID:           e.ID,
+		SourceID:     e.SourceID,
+		SourceName:   e.SourceName,
+		DeviceID:     e.DeviceID,
+		Domain:       e.Domain,
+		LocalName:    e.LocalName,
+		Actions:      e.Actions,
+		Data:         e.Data,
+		Labels:       e.Labels,
+		Snapshots:    e.Snapshots,
+		CommandQuery: e.CommandQuery,
 	}
 	if desc, ok := types.GetDomainDescriptor(e.Domain); ok {
 		filtered := filterDescriptor(desc, e.Actions)
@@ -74,21 +77,34 @@ func filterDescriptor(desc types.DomainDescriptor, actions []string) types.Domai
 	return filtered
 }
 
-func saveDeviceToRegistry(raw json.RawMessage, fallback types.Device) {
-	if registryService == nil {
+func pluginRegistryForSave(pluginID string) *regsvc.Registry {
+	if strings.TrimSpace(pluginID) == "" || nc == nil {
+		return nil
+	}
+	return regsvc.RegistryService(pluginID, regsvc.WithNATS(nc), regsvc.WithPersist(regsvc.PersistNever))
+}
+
+func saveDeviceToRegistry(pluginID string, raw json.RawMessage, fallback types.Device) {
+	reg := pluginRegistryForSave(pluginID)
+	if reg == nil {
 		return
 	}
+	if err := reg.Start(); err != nil {
+		return
+	}
+	defer reg.Stop()
+
 	var dev types.Device
 	if len(raw) > 0 && json.Unmarshal(raw, &dev) == nil && strings.TrimSpace(dev.ID) != "" {
 		// Preserve gateway-managed fields not returned by the plugin.
 		if dev.EntityQuery == nil {
 			dev.EntityQuery = fallback.EntityQuery
 		}
-		_ = registryService.SaveDevice(dev)
+		_ = reg.SaveDevice(dev)
 		return
 	}
 	if strings.TrimSpace(fallback.ID) != "" {
-		_ = registryService.SaveDevice(fallback)
+		_ = reg.SaveDevice(fallback)
 	}
 }
 
@@ -120,17 +136,23 @@ func augmentWithEntityQuery(deviceID string, base []types.Entity) []types.Entity
 	return base
 }
 
-func saveEntityToRegistry(fallbackDeviceID string, raw json.RawMessage, fallback types.Entity) {
-	if registryService == nil {
+func saveEntityToRegistry(pluginID, fallbackDeviceID string, raw json.RawMessage, fallback types.Entity) {
+	reg := pluginRegistryForSave(pluginID)
+	if reg == nil {
 		return
 	}
+	if err := reg.Start(); err != nil {
+		return
+	}
+	defer reg.Stop()
+
 	var ent types.Entity
 	if len(raw) > 0 && json.Unmarshal(raw, &ent) == nil && strings.TrimSpace(ent.ID) != "" {
 		if strings.TrimSpace(ent.DeviceID) == "" {
 			ent.DeviceID = fallbackDeviceID
 		}
 		if strings.TrimSpace(ent.DeviceID) != "" {
-			_ = registryService.SaveEntity(ent)
+			_ = reg.SaveEntity(ent)
 			return
 		}
 	}
@@ -143,7 +165,7 @@ func saveEntityToRegistry(fallbackDeviceID string, raw json.RawMessage, fallback
 	if strings.TrimSpace(fallback.DeviceID) == "" {
 		return
 	}
-	_ = registryService.SaveEntity(fallback)
+	_ = reg.SaveEntity(fallback)
 }
 
 func performEntitySearch(query types.SearchQuery) []types.Entity {

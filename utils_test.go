@@ -226,6 +226,10 @@ func ResetGlobals() {
 		commandService.Close()
 		commandService = nil
 	}
+	if scriptRuntime != nil {
+		scriptRuntime.Stop()
+		scriptRuntime = nil
+	}
 	regMu.Lock()
 	registry = make(map[string]pluginRecord)
 	regMu.Unlock()

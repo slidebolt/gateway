@@ -10,5 +10,6 @@
 package main
 
 func main() {
+	initLogger()
 	run()
 }
