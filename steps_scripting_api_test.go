@@ -265,6 +265,7 @@ func newScriptingTestCtx() *scriptingTestCtx {
 		Commands: submitter,
 		Finder:   finder,
 		Bus:      bus,
+		Timers:   scripting.NewOSTimerService(),
 	}
 	return &scriptingTestCtx{
 		finder:          finder,
@@ -360,11 +361,58 @@ func aScriptingCommandEnvironmentWith1PluginAnd2Entities(ctx context.Context) (c
 func aScriptingEventEnvironmentWithTestEntities(ctx context.Context) (context.Context, error) {
 	sc := newScriptingTestCtx()
 	sc.finder.entities = []types.Entity{
-		{ID: "entity-a", Domain: "light", Labels: map[string][]string{"Room": {"Kitchen"}}},
+		{
+			ID:      "entity-a",
+			Domain:  "light",
+			Labels:  map[string][]string{"Room": {"Kitchen"}},
+			Actions: []string{"turn_on", "turn_off", "set_rgb", "set_brightness"},
+		},
 		{ID: "entity-b", Domain: "switch"},
 	}
 	sc.anonCtx, sc.anonCancel = context.WithCancel(context.Background())
 	return context.WithValue(ctx, scriptingCtxKey{}, sc), nil
+}
+
+func aScriptingEnvironmentWithCapabilityAwareEntities(ctx context.Context) (context.Context, error) {
+	sc := newScriptingTestCtx()
+	sc.finder.entities = []types.Entity{
+		{
+			ID:      "e-rgb-light",
+			Domain:  "light",
+			PluginID: "plugin-1",
+			DeviceID: "device-1",
+			Actions: []string{"turn_on", "turn_off", "set_rgb", "set_brightness"},
+		},
+		{
+			ID:      "e-switch",
+			Domain:  "switch",
+			PluginID: "plugin-1",
+			DeviceID: "device-1",
+			Actions: []string{"turn_on", "turn_off"},
+		},
+		{
+			ID:     "e-bare",
+			Domain: "sensor",
+			PluginID: "plugin-1",
+			DeviceID: "device-1",
+			// No Actions — represents a device that hasn't advertised capabilities.
+			// entitySupportsAllActions returns true (pass-through) for these.
+		},
+	}
+	sc.anonCtx, sc.anonCancel = context.WithCancel(context.Background())
+	return context.WithValue(ctx, scriptingCtxKey{}, sc), nil
+}
+
+func noCommandWasRecordedForEntity(ctx context.Context, entityID string) error {
+	sc := scriptingCtxFrom(ctx)
+	if sc == nil {
+		return fmt.Errorf("no scripting context")
+	}
+	rec := sc.submitter.lastCommandFor(entityID)
+	if rec != nil {
+		return fmt.Errorf("expected no command for entity %q, got command %q", entityID, rec.name)
+	}
+	return nil
 }
 
 func aScriptingEnvironmentWithEntityOfDomain(ctx context.Context, entityID, domain string) (context.Context, error) {
@@ -546,6 +594,17 @@ func theRecordedCommandOnHasName(ctx context.Context, entityID, cmdName string) 
 	return nil
 }
 
+func theRecordedCommandCountIsAtLeast(ctx context.Context, count int) error {
+	sc := scriptingCtxFrom(ctx)
+	sc.submitter.mu.Lock()
+	n := len(sc.submitter.commands)
+	sc.submitter.mu.Unlock()
+	if n < count {
+		return fmt.Errorf("expected at least %d commands recorded, got %d", count, n)
+	}
+	return nil
+}
+
 func iCallCommandServiceScriptingSendToWithQueryCommand(ctx context.Context, queryStr, command string) error {
 	sc := scriptingCtxFrom(ctx)
 	entities := sc.finder.FindEntities(types.SearchQuery{Domain: strings.TrimPrefix(queryStr, "?domain=")})
@@ -663,16 +722,27 @@ func entityHasLabel(ctx context.Context, entityID, labelKV string) error {
 	if len(parts) != 2 {
 		return fmt.Errorf("label must be Key:Value, got %q", labelKV)
 	}
+	found := false
 	for i, e := range sc.finder.entities {
 		if e.ID == entityID {
 			if sc.finder.entities[i].Labels == nil {
 				sc.finder.entities[i].Labels = make(map[string][]string)
 			}
 			sc.finder.entities[i].Labels[parts[0]] = append(sc.finder.entities[i].Labels[parts[0]], parts[1])
-			return nil
+			found = true
+			break
 		}
 	}
-	return fmt.Errorf("entity %q not found", entityID)
+	if !found {
+		// Auto-create for BDD convenience
+		sc.finder.entities = append(sc.finder.entities, types.Entity{
+			ID:      entityID,
+			Domain:  "light",
+			Labels:  map[string][]string{parts[0]: {parts[1]}},
+			Actions: []string{"turn_on", "turn_off", "set_brightness", "set_rgb"},
+		})
+	}
+	return nil
 }
 
 func subscriptionFiresOnce(ctx context.Context, name string) error {
@@ -926,12 +996,32 @@ func getStateReturnsAMapWithKeyValue(ctx context.Context, key, value string) err
 // Step registration
 // ---------------------------------------------------------------------------
 
+func theRecordedCommandOnWithDomainHasRGBArray(ctx context.Context, entityID, domain string, r, g, b int) error {
+	sc := scriptingCtxFrom(ctx)
+	rec := sc.submitter.lastCommandFor(entityID)
+	if rec == nil {
+		return fmt.Errorf("no command recorded for entity %q", entityID)
+	}
+	rgb, ok := rec.payload["rgb"].([]any)
+	if !ok {
+		return fmt.Errorf("command payload missing 'rgb' array, got %T: %v", rec.payload["rgb"], rec.payload["rgb"])
+	}
+	if len(rgb) != 3 {
+		return fmt.Errorf("expected RGB array of length 3, got %d", len(rgb))
+	}
+	if int(rgb[0].(float64)) != r || int(rgb[1].(float64)) != g || int(rgb[2].(float64)) != b {
+		return fmt.Errorf("expected RGB [%d, %d, %d], got [%v, %v, %v]", r, g, b, rgb[0], rgb[1], rgb[2])
+	}
+	return nil
+}
+
 func registerScriptingAPISteps(sc *godog.ScenarioContext) {
 	// Background
 	sc.Step(`^a scripting query environment with 3 plugins and mixed domains$`, aScriptingQueryEnvironmentWith3PluginsAndMixedDomains)
 	sc.Step(`^a scripting command environment with 1 plugin and 2 entities$`, aScriptingCommandEnvironmentWith1PluginAnd2Entities)
 	sc.Step(`^a scripting event environment with test entities$`, aScriptingEventEnvironmentWithTestEntities)
 	sc.Step(`^a scripting environment with entity "([^"]*)" of domain "([^"]*)"$`, aScriptingEnvironmentWithEntityOfDomain)
+	sc.Step(`^a scripting environment with capability-aware entities$`, aScriptingEnvironmentWithCapabilityAwareEntities)
 
 	// Query
 	sc.Step(`^I call QueryService\.Scripting\.Find with "([^"]*)"$`, iCallQueryServiceScriptingFindWith)
@@ -954,10 +1044,13 @@ func registerScriptingAPISteps(sc *godog.ScenarioContext) {
 	sc.Step(`^Send returns a non-empty command ID$`, sendReturnsANonEmptyCommandID)
 	sc.Step(`^Send returns an error$`, sendReturnsAnError)
 	sc.Step(`^the recorded command on "([^"]*)" has name "([^"]*)"$`, theRecordedCommandOnHasName)
+	sc.Step(`^no command was recorded for entity "([^"]*)"$`, noCommandWasRecordedForEntity)
+	sc.Step(`^the recorded command count is at least (\d+)$`, theRecordedCommandCountIsAtLeast)
 	sc.Step(`^I call CommandService\.Scripting\.SendTo with query "([^"]*)" command "([^"]*)"$`, iCallCommandServiceScriptingSendToWithQueryCommand)
 	sc.Step(`^SendTo sends to at least 1 entity$`, sendToSendsToAtLeast1Entity)
 	sc.Step(`^SendTo returns an entity-not-found error$`, sendToReturnsAnEntityNotFoundError)
 	sc.Step(`^the recorded command payload contains brightness (\d+)$`, theRecordedCommandPayloadContainsBrightness)
+	sc.Step(`^the recorded command on "([^"]*)" with domain "([^"]*)" has RGB array \[(\d+), (\d+), (\d+)\]$`, theRecordedCommandOnWithDomainHasRGBArray)
 
 	// Event
 	sc.Step(`^I subscribe with "([^"]*)"$`, iSubscribeWith)

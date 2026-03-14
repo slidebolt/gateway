@@ -40,20 +40,22 @@ func (p *runnerBackedPlugin) OnCommand(req types.Command, entity types.Entity) e
 		return err
 	}
 	action, _ := payload["type"].(string)
-	event := map[string]any{"type": action}
+
+	// Canonical state: no "type" key; "power" field is required by the runner.
+	state := map[string]any{"power": true}
 	switch action {
 	case light.ActionTurnOn:
-		event["power"] = true
+		state["power"] = true
 	case light.ActionTurnOff:
-		event["power"] = false
+		state["power"] = false
 	case light.ActionSetBrightness:
-		event["brightness"] = payload["brightness"]
+		state["brightness"] = payload["brightness"]
 	case light.ActionSetTemperature:
-		event["temperature"] = payload["temperature"]
+		state["temperature"] = payload["temperature"]
 	case light.ActionSetRGB:
-		event["rgb"] = payload["rgb"]
+		state["rgb"] = payload["rgb"]
 	}
-	raw, err := json.Marshal(event)
+	raw, err := json.Marshal(state)
 	if err != nil {
 		return err
 	}

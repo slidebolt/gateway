@@ -23,6 +23,7 @@ type EntityResponse struct {
 	Labels       map[string][]string             `json:"labels,omitempty"`
 	Snapshots    map[string]types.EntitySnapshot `json:"snapshots,omitempty"`
 	CommandQuery *types.SearchQuery              `json:"command_query,omitempty"`
+	Meta         map[string]json.RawMessage      `json:"meta,omitempty"`
 	DomainSchema *types.DomainDescriptor         `json:"schema,omitempty"`
 }
 
@@ -39,6 +40,7 @@ func toEntityResponse(e types.Entity) EntityResponse {
 		Labels:       e.Labels,
 		Snapshots:    e.Snapshots,
 		CommandQuery: e.CommandQuery,
+		Meta:         e.Meta,
 	}
 	if desc, ok := types.GetDomainDescriptor(e.Domain); ok {
 		filtered := filterDescriptor(desc, e.Actions)
@@ -152,6 +154,14 @@ func saveEntityToRegistry(pluginID, fallbackDeviceID string, raw json.RawMessage
 			ent.DeviceID = fallbackDeviceID
 		}
 		if strings.TrimSpace(ent.DeviceID) != "" {
+			// Preserve gateway-managed meta when the incoming entity doesn't carry it.
+			if ent.Meta == nil && registryService != nil {
+				if hits := registryService.FindEntities(types.SearchQuery{
+					PluginID: pluginID, EntityID: ent.ID, DeviceID: ent.DeviceID, Limit: 1,
+				}); len(hits) > 0 {
+					ent.Meta = hits[0].Meta
+				}
+			}
 			_ = reg.SaveEntity(ent)
 			return
 		}
@@ -164,6 +174,14 @@ func saveEntityToRegistry(pluginID, fallbackDeviceID string, raw json.RawMessage
 	}
 	if strings.TrimSpace(fallback.DeviceID) == "" {
 		return
+	}
+	// Preserve gateway-managed meta in the fallback path too.
+	if fallback.Meta == nil && registryService != nil {
+		if hits := registryService.FindEntities(types.SearchQuery{
+			PluginID: pluginID, EntityID: fallback.ID, DeviceID: fallback.DeviceID, Limit: 1,
+		}); len(hits) > 0 {
+			fallback.Meta = hits[0].Meta
+		}
 	}
 	_ = reg.SaveEntity(fallback)
 }

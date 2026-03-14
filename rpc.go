@@ -14,9 +14,6 @@ import (
 func routeRPC(pluginID, method string, params any) types.Response {
 	started := time.Now()
 	traceRPC := method == "entities/commands/create" || method == "commands/status/get" || method == "entities/list"
-	if traceRPC {
-		log.Printf("gateway virtual-cmd: rpc start plugin=%s method=%s", pluginID, method)
-	}
 	regMu.RLock()
 	record, exists := registry[pluginID]
 	regMu.RUnlock()
@@ -26,6 +23,9 @@ func routeRPC(pluginID, method string, params any) types.Response {
 	}
 	reg := record.Registration
 	paramsBytes, _ := json.Marshal(params)
+	if traceRPC {
+		log.Printf("gateway virtual-cmd: rpc start plugin=%s method=%s payload=%s", pluginID, method, string(paramsBytes))
+	}
 	id := json.RawMessage(`1`)
 	req := types.Request{JSONRPC: types.JSONRPCVersion, ID: &id, Method: method, Params: paramsBytes}
 	data, _ := json.Marshal(req)

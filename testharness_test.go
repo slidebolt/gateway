@@ -176,6 +176,17 @@ func (h *Harness) Delete(path string) (*http.Response, error) {
 	return http.DefaultClient.Do(req)
 }
 
+// Patch performs a PATCH with a JSON body against the test server.
+func (h *Harness) Patch(path string, body any) (*http.Response, error) {
+	data, _ := json.Marshal(body)
+	req, err := http.NewRequest(http.MethodPatch, h.Server.URL+path, strings.NewReader(string(data)))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	return http.DefaultClient.Do(req)
+}
+
 // Put performs a PUT with a JSON body against the test server.
 func (h *Harness) Put(path string, body any) (*http.Response, error) {
 	data, _ := json.Marshal(body)
@@ -415,6 +426,32 @@ func (p *SimulatedPlugin) dispatch(method string, params json.RawMessage) (any, 
 			}
 		}
 		return nil, fmt.Errorf("entity not found")
+
+	case "entities/update":
+		var args types.Entity
+		_ = json.Unmarshal(params, &args)
+		p.mu.Lock()
+		var updated types.Entity
+		found := false
+		for i := range p.Entities {
+			e := &p.Entities[i]
+			if e.ID == args.ID && (args.DeviceID == "" || e.DeviceID == args.DeviceID) {
+				if args.Labels != nil {
+					e.Labels = args.Labels
+				}
+				if args.LocalName != "" {
+					e.LocalName = args.LocalName
+				}
+				updated = *e
+				found = true
+				break
+			}
+		}
+		p.mu.Unlock()
+		if !found {
+			return nil, fmt.Errorf("entity not found")
+		}
+		return updated, nil
 
 	case "entities/commands/create":
 		var args struct {

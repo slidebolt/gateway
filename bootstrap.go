@@ -192,7 +192,7 @@ func subscribeRegistry() {
 			Valid:        true,
 		}
 		regMu.Unlock()
-		slog.Info("plugin registered", "plugin_id", reg.Manifest.ID)
+		slog.Debug("plugin registered", "plugin_id", reg.Manifest.ID)
 	})
 }
 

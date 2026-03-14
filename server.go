@@ -37,5 +37,9 @@ func buildRouter() (*gin.Engine, huma.API) {
 		r.GET("/api/topics/subscribe", historyService.SSEHandler())
 	}
 
+	r.NoRoute(func(c *gin.Context) {
+		c.Redirect(302, "/openapi.json")
+	})
+
 	return r, api
 }

@@ -147,6 +147,7 @@ func InitializeScenario(sc *godog.ScenarioContext) {
 	registerGroupSteps(sc)
 	registerEntityQuerySteps(sc)
 	registerEventSubscriptionSteps(sc)
+	registerEntityMetaSteps(sc)
 }
 
 type tmpDirKey struct{}

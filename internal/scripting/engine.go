@@ -3,6 +3,8 @@ package scripting
 import (
 	"context"
 	"fmt"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/slidebolt/sdk-types"
@@ -64,6 +66,7 @@ type VM struct {
 	Query    *QueryScripting
 	Commands *CommandScripting
 	Events   *EventScripting
+	Timers   *TimerScripting
 }
 
 type workItem struct {
@@ -89,6 +92,7 @@ func newVM(entity types.Entity, source string, svc Services) (*VM, error) {
 		Commands: cmds,
 		Events:   evts,
 	}
+	v.Timers = newTimerScripting(v, svc.Timers)
 	v.runOnInit = func() error { return nil } // no-op default
 	return v, nil
 }
@@ -132,7 +136,154 @@ func (v *VM) loop() {
 // waits for the work-queue goroutine to exit.
 func (v *VM) Stop() {
 	v.cancel()
+	v.Timers.Stop()
 	<-v.done
+}
+
+// ... (Exec, EnqueueEvent, etc)
+
+// ---------------------------------------------------------------------------
+// TimerScripting — TimerService.Scripting.*
+// ---------------------------------------------------------------------------
+
+// TimerScripting provides the ergonomic Lua-facing timer API.
+// It wraps the shared TimerService to provide VM-local cleanup.
+type TimerScripting struct {
+	vm     *VM
+	shared TimerService
+	mu     sync.Mutex
+	ids    map[TimerID]struct{}
+}
+
+func newTimerScripting(vm *VM, shared TimerService) *TimerScripting {
+	return &TimerScripting{
+		vm:     vm,
+		shared: shared,
+		ids:    make(map[TimerID]struct{}),
+	}
+}
+
+func (t *TimerScripting) After(d time.Duration, fn func()) TimerID {
+	if t.shared == nil {
+		return 0
+	}
+	var id TimerID
+	id = t.shared.After(d, func() {
+		t.mu.Lock()
+		delete(t.ids, id)
+		t.mu.Unlock()
+		t.vm.EnqueueEvent(func() error {
+			fn()
+			return nil
+		})
+	})
+	t.mu.Lock()
+	t.ids[id] = struct{}{}
+	t.mu.Unlock()
+	return id
+}
+
+func (t *TimerScripting) Every(d time.Duration, fn func()) TimerID {
+	if t.shared == nil {
+		return 0
+	}
+	id := t.shared.Every(d, func() {
+		t.vm.EnqueueEvent(func() error {
+			fn()
+			return nil
+		})
+	})
+	t.mu.Lock()
+	t.ids[id] = struct{}{}
+	t.mu.Unlock()
+	return id
+}
+
+func (t *TimerScripting) Cancel(id TimerID) {
+	if t.shared == nil {
+		return
+	}
+	t.shared.Cancel(id)
+	t.mu.Lock()
+	delete(t.ids, id)
+	t.mu.Unlock()
+}
+
+func (t *TimerScripting) Stop() {
+	if t == nil || t.shared == nil {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for id := range t.ids {
+		t.shared.Cancel(id)
+	}
+	t.ids = make(map[TimerID]struct{})
+}
+
+// ---------------------------------------------------------------------------
+// OS Timer Service — Default implementation
+// ---------------------------------------------------------------------------
+
+type osTimerService struct {
+	nextID int64
+	mu     sync.Mutex
+	timers map[TimerID]timerHandle
+}
+
+type timerHandle struct {
+	stop func()
+}
+
+func NewOSTimerService() TimerService {
+	return &osTimerService{
+		timers: make(map[TimerID]timerHandle),
+	}
+}
+
+func (s *osTimerService) After(d time.Duration, fn func()) TimerID {
+	id := TimerID(atomic.AddInt64(&s.nextID, 1))
+	t := time.AfterFunc(d, func() {
+		s.mu.Lock()
+		delete(s.timers, id)
+		s.mu.Unlock()
+		fn()
+	})
+	s.mu.Lock()
+	s.timers[id] = timerHandle{stop: func() { t.Stop() }}
+	s.mu.Unlock()
+	return id
+}
+
+func (s *osTimerService) Every(d time.Duration, fn func()) TimerID {
+	id := TimerID(atomic.AddInt64(&s.nextID, 1))
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		ticker := time.NewTicker(d)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				fn()
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	s.mu.Lock()
+	s.timers[id] = timerHandle{stop: cancel}
+	s.mu.Unlock()
+	return id
+}
+
+func (s *osTimerService) Cancel(id TimerID) {
+	s.mu.Lock()
+	h, ok := s.timers[id]
+	delete(s.timers, id)
+	s.mu.Unlock()
+	if ok {
+		h.stop()
+	}
 }
 
 // Exec runs an arbitrary function on the VM's goroutine and returns its error.
@@ -163,6 +314,3 @@ func (v *VM) EnqueueEvent(fn func() error) {
 
 // Source returns the Lua source this VM was created with.
 func (v *VM) Source() string { return v.source }
-
-// Entity returns the bound entity.
-func (v *VM) Entity() types.Entity { return v.entity }

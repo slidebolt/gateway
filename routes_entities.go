@@ -66,6 +66,20 @@ type GetEntityInput struct {
 }
 type GetEntityOutput struct{ Body EntityResponse }
 
+type PatchEntityMetaInput struct {
+	PluginID string `path:"plugin_id" doc:"Plugin ID"`
+	DeviceID string `path:"device_id" doc:"Device ID"`
+	EntityID string `path:"entity_id" doc:"Entity ID"`
+	Body     map[string]json.RawMessage
+}
+
+type DeleteEntityMetaInput struct {
+	PluginID string `path:"plugin_id" doc:"Plugin ID"`
+	DeviceID string `path:"device_id" doc:"Device ID"`
+	EntityID string `path:"entity_id" doc:"Entity ID"`
+	MetaKey  string `path:"meta_key" doc:"Meta key to delete"`
+}
+
 type GetEntityEventsInput struct {
 	PluginID string `path:"plugin_id" doc:"Plugin ID"`
 	DeviceID string `path:"device_id" doc:"Device ID"`
@@ -226,6 +240,14 @@ func registerEntityRoutes(api huma.API) {
 		entities, _ := parseEntities(resp)
 		for _, e := range entities {
 			if e.ID == input.EntityID {
+				// Overlay gateway-managed meta from the registry.
+				if registryService != nil {
+					if hits := registryService.FindEntities(types.SearchQuery{
+						PluginID: input.PluginID, DeviceID: input.DeviceID, EntityID: input.EntityID, Limit: 1,
+					}); len(hits) > 0 {
+						e.Meta = hits[0].Meta
+					}
+				}
 				return &GetEntityOutput{Body: toEntityResponse(e)}, nil
 			}
 		}
@@ -275,5 +297,50 @@ func registerEntityRoutes(api huma.API) {
 			Domain:      target.Domain,
 			ValidEvents: filtered.Events,
 		}}, nil
+	})
+
+	huma.Register(api, huma.Operation{
+		OperationID: "patch-entity-meta",
+		Method:      http.MethodPatch,
+		Path:        "/api/plugins/{plugin_id}/devices/{device_id}/entities/{entity_id}/meta",
+		Summary:     "Patch entity meta",
+		Description: "Merges provided key/value pairs into entity.meta. Keys are merged, not replaced.",
+		Tags:        []string{"entities"},
+	}, func(ctx context.Context, input *PatchEntityMetaInput) (*EntityOutput, error) {
+		if len(input.Body) == 0 {
+			return nil, badReqErr("meta body must not be empty")
+		}
+		entity, err := findEntity(input.PluginID, input.DeviceID, input.EntityID)
+		if err != nil {
+			return nil, notFoundErr("entity not found")
+		}
+		if entity.Meta == nil {
+			entity.Meta = make(map[string]json.RawMessage)
+		}
+		for k, v := range input.Body {
+			entity.Meta[k] = v
+		}
+		raw, _ := json.Marshal(entity)
+		saveEntityToRegistry(input.PluginID, input.DeviceID, raw, entity)
+		return &EntityOutput{Body: raw}, nil
+	})
+
+	huma.Register(api, huma.Operation{
+		OperationID:   "delete-entity-meta-key",
+		Method:        http.MethodDelete,
+		Path:          "/api/plugins/{plugin_id}/devices/{device_id}/entities/{entity_id}/meta/{meta_key}",
+		Summary:       "Delete entity meta key",
+		Description:   "Removes a single key from entity.meta.",
+		DefaultStatus: http.StatusNoContent,
+		Tags:          []string{"entities"},
+	}, func(ctx context.Context, input *DeleteEntityMetaInput) (*struct{}, error) {
+		entity, err := findEntity(input.PluginID, input.DeviceID, input.EntityID)
+		if err != nil {
+			return nil, notFoundErr("entity not found")
+		}
+		delete(entity.Meta, input.MetaKey)
+		raw, _ := json.Marshal(entity)
+		saveEntityToRegistry(input.PluginID, input.DeviceID, raw, entity)
+		return nil, nil
 	})
 }

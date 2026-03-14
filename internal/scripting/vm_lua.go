@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 	"time"
@@ -53,6 +54,7 @@ func newLuaVM(entity types.Entity, source string, svc Services) (*LuaVM, error) 
 		},
 		L: L,
 	}
+	lvm.VM.Timers = newTimerScripting(lvm.VM, svc.Timers)
 
 	// Wire runOnInit to our Lua executor.
 	lvm.VM.runOnInit = lvm.execOnInit
@@ -108,8 +110,14 @@ func (lvm *LuaVM) execOnInit() error {
 		lvm.L.SetContext(lvm.VM.ctx)
 	}()
 
-	if err := lvm.L.DoString(lvm.VM.source); err != nil {
-		return fmt.Errorf("scripting: Lua parse/exec error: %w", err)
+	chunkName := "script:" + lvm.VM.entity.ID
+	fn, err := lvm.L.Load(strings.NewReader(lvm.VM.source), chunkName)
+	if err != nil {
+		return fmt.Errorf("scripting: Lua parse error in %s: %w", chunkName, err)
+	}
+	lvm.L.Push(fn)
+	if err := lvm.L.PCall(0, lua.MultRet, nil); err != nil {
+		return fmt.Errorf("scripting: Lua exec error in %s: %w", chunkName, err)
 	}
 
 	// Call OnInit(ctx_table) if defined.
@@ -141,7 +149,13 @@ func (lvm *LuaVM) ExecLua(src string) (string, error) {
 		}()
 
 		top := lvm.L.GetTop()
-		if err := lvm.L.DoString(src); err != nil {
+		chunkName := "script:" + lvm.VM.entity.ID
+		fn, err := lvm.L.Load(strings.NewReader(src), chunkName)
+		if err != nil {
+			return fmt.Errorf("scripting: %w", err)
+		}
+		lvm.L.Push(fn)
+		if err := lvm.L.PCall(0, lua.MultRet, nil); err != nil {
 			return fmt.Errorf("scripting: %w", err)
 		}
 		if lvm.L.GetTop() > top {
@@ -232,6 +246,9 @@ func (lvm *LuaVM) HandleCommand(name string, params map[string]any) error {
 func (lvm *LuaVM) injectBindings() {
 	L := lvm.L
 
+	// Override global print to use slog.
+	L.SetGlobal("print", L.NewFunction(lvm.luaPrint))
+
 	// ParseLabels — types.ParseLabels exposed directly.
 	L.SetGlobal("ParseLabels", L.NewFunction(lvm.luaParseLabels))
 
@@ -246,6 +263,12 @@ func (lvm *LuaVM) injectBindings() {
 
 	// EventService.Scripting
 	lvm.injectEventService()
+
+	// LogService.Scripting
+	lvm.injectLogService()
+
+	// TimerService.Scripting
+	lvm.injectTimerService()
 }
 
 // ---------------------------------------------------------------------------
@@ -264,10 +287,24 @@ func (lvm *LuaVM) injectThis() {
 	L.SetField(t, "DeviceID", lua.LString(this.Entity.DeviceID))
 	L.SetField(t, "Domain", lua.LString(this.Entity.Domain))
 
-	// This.SendCommand(action, params_table)
+	// This.Log(msg, [params_table])
+	L.SetField(t, "Log", L.NewFunction(func(L *lua.LState) int {
+		msg := L.CheckString(1)
+		params := tableToMap(L, L.OptTable(2, L.NewTable()))
+		lvm.log(slog.LevelInfo, msg, params)
+		return 0
+	}))
+
+	// This.SendCommand(action, params_table, opts_table)
+	// opts: {failOnError=false} — when false (default), unsupported actions are silently skipped
 	L.SetField(t, "SendCommand", L.NewFunction(func(L *lua.LState) int {
 		action := L.CheckString(1)
 		params := tableToMap(L, L.OptTable(2, L.NewTable()))
+		opts := L.OptTable(3, L.NewTable())
+		failOnError := opts.RawGetString("failOnError") == lua.LTrue
+		if !failOnError && !entitySupportsActionLua(this.Entity.Actions, action) {
+			return 0 // silently skip
+		}
 		cmdID, err := this.SendCommand(action, params)
 		if err != nil {
 			L.RaiseError("This.SendCommand: %s", err)
@@ -286,17 +323,26 @@ func (lvm *LuaVM) injectThis() {
 		return 0
 	}))
 
-	// This.OnEvent(ctx, subject, fn) or This.OnEvent(ctx, fn) for entity's own events
+	// This.OnEvent(subject, fn) or This.OnEvent(fn) for entity's own events
 	L.SetField(t, "OnEvent", L.NewFunction(func(L *lua.LState) int {
-		subject := this.Entity.ID + ".*"
+		top := L.GetTop()
+		var subject string
 		var fn *lua.LFunction
-		if L.GetTop() == 2 {
-			// OnEvent(ctx, fn) — own entity events
-			fn = L.CheckFunction(2)
+
+		// Support colon call (self is arg 1)
+		argOffset := 0
+		if top > 0 && L.Get(1).Type() == lua.LTTable {
+			argOffset = 1
+		}
+
+		if top-argOffset == 1 {
+			// OnEvent(fn)
+			subject = this.Entity.ID + ".*"
+			fn = L.CheckFunction(argOffset + 1)
 		} else {
-			// OnEvent(ctx, subject, fn)
-			subject = L.CheckString(2)
-			fn = L.CheckFunction(3)
+			// OnEvent(subject, fn)
+			subject = L.CheckString(argOffset + 1)
+			fn = L.CheckFunction(argOffset + 2)
 		}
 		lvm.subscribeEventHandler(subject, fn)
 		return 0
@@ -394,11 +440,30 @@ func (lvm *LuaVM) injectCommandService() {
 
 	scripting := L.NewTable()
 
-	// CommandService.Scripting.Send(entity_table, action, params_table) → cmdID
+	// CommandService.Scripting.Send(entity_table, action, params_table, opts_table) → cmdID
+	// opts: {failOnError=false} — when false (default), unsupported actions are silently skipped
 	L.SetField(scripting, "Send", L.NewFunction(func(L *lua.LState) int {
 		eTable := L.CheckTable(1)
 		action := L.CheckString(2)
 		params := tableToMap(L, L.OptTable(3, L.NewTable()))
+		opts := L.OptTable(4, L.NewTable())
+		failOnError := opts.RawGetString("failOnError") == lua.LTrue
+
+		// Check action support via Actions table on the entity table
+		if !failOnError {
+			actionsVal := eTable.RawGetString("Actions")
+			if at, ok := actionsVal.(*lua.LTable); ok {
+				supported := false
+				at.ForEach(func(_, v lua.LValue) {
+					if lua.LString(action) == v {
+						supported = true
+					}
+				})
+				if !supported {
+					return 0 // silently skip
+				}
+			}
+		}
 
 		e := tableToEntity(L, eTable)
 		cmdID, err := cs.Send(e, action, params)
@@ -483,14 +548,20 @@ func (lvm *LuaVM) injectEventService() {
 // VM's work queue. The subscription lives until the VM's ctx is cancelled.
 func (lvm *LuaVM) subscribeEventHandler(subject string, fn *lua.LFunction) {
 	_, err := lvm.VM.Events.OnEvent(lvm.VM.ctx, subject, func(env types.EntityEventEnvelope) {
+		lvm.log(slog.LevelDebug, "NATS event received by scripting bridge", map[string]any{
+			"subject":   subject,
+			"entity_id": env.EntityID,
+		})
 		lvm.VM.EnqueueEvent(func() error {
+			lvm.log(slog.LevelDebug, "Delivering event to Lua callback", map[string]any{
+				"entity_id": env.EntityID,
+			})
 			envTable := envelopeToTable(lvm.L, env)
 			return lvm.L.CallByParam(lua.P{Fn: fn, NRet: 0, Protect: true}, envTable)
 		})
 	})
 	if err != nil {
-		// Non-fatal: log or surface via Lua error on next call.
-		_ = err
+		lvm.log(slog.LevelError, "Failed to subscribe to events in Lua", map[string]any{"err": err, "subject": subject})
 	}
 }
 
@@ -502,6 +573,126 @@ func (lvm *LuaVM) newCtxTable() *lua.LTable {
 }
 
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// LogService.Scripting
+// ---------------------------------------------------------------------------
+
+func (lvm *LuaVM) injectLogService() {
+	L := lvm.L
+	scripting := L.NewTable()
+
+	L.SetField(scripting, "Info", L.NewFunction(func(L *lua.LState) int {
+		lvm.log(slog.LevelInfo, L.CheckString(1), tableToMap(L, L.OptTable(2, L.NewTable())))
+		return 0
+	}))
+	L.SetField(scripting, "Warn", L.NewFunction(func(L *lua.LState) int {
+		lvm.log(slog.LevelWarn, L.CheckString(1), tableToMap(L, L.OptTable(2, L.NewTable())))
+		return 0
+	}))
+	L.SetField(scripting, "Error", L.NewFunction(func(L *lua.LState) int {
+		lvm.log(slog.LevelError, L.CheckString(1), tableToMap(L, L.OptTable(2, L.NewTable())))
+		return 0
+	}))
+	L.SetField(scripting, "Debug", L.NewFunction(func(L *lua.LState) int {
+		lvm.log(slog.LevelDebug, L.CheckString(1), tableToMap(L, L.OptTable(2, L.NewTable())))
+		return 0
+	}))
+
+	scriptingParent := L.NewTable()
+	L.SetField(scriptingParent, "Scripting", scripting)
+	L.SetGlobal("LogService", scriptingParent)
+}
+
+func (lvm *LuaVM) luaPrint(L *lua.LState) int {
+	top := L.GetTop()
+	parts := make([]string, 0, top)
+	for i := 1; i <= top; i++ {
+		parts = append(parts, L.ToStringMeta(L.Get(i)).String())
+	}
+	lvm.log(slog.LevelInfo, strings.Join(parts, "\t"), nil)
+	return 0
+}
+
+func (lvm *LuaVM) log(level slog.Level, msg string, params map[string]any) {
+	if lvm.VM.svc.Logger == nil {
+		return
+	}
+	attrs := []any{
+		slog.String("plugin_id", lvm.VM.entity.PluginID),
+		slog.String("device_id", lvm.VM.entity.DeviceID),
+		slog.String("entity_id", lvm.VM.entity.ID),
+		slog.String("source", "lua"),
+	}
+	for k, v := range params {
+		attrs = append(attrs, slog.Any(k, v))
+	}
+	lvm.VM.svc.Logger.Log(context.Background(), level, msg, attrs...)
+}
+
+// ---------------------------------------------------------------------------
+// TimerService.Scripting
+// ---------------------------------------------------------------------------
+
+// luaErrMsg formats a gopher-lua error for logging. It strips duplicate stack
+// tracebacks that appear when errors propagate through multiple Lua call frames.
+func luaErrMsg(err error) string {
+	s := err.Error()
+	// gopher-lua can produce two "stack traceback:" sections; keep only the first.
+	const marker = "\nstack traceback:"
+	first := strings.Index(s, marker)
+	if first != -1 {
+		second := strings.Index(s[first+1:], marker)
+		if second != -1 {
+			s = s[:first+1+second]
+		}
+	}
+	return s
+}
+
+func (lvm *LuaVM) injectTimerService() {
+	L := lvm.L
+	ts := lvm.VM.Timers
+
+	scripting := L.NewTable()
+
+	// TimerService.Scripting.After(seconds, fn) -> id
+	L.SetField(scripting, "After", L.NewFunction(func(L *lua.LState) int {
+		delay := time.Duration(float64(L.CheckNumber(1)) * float64(time.Second))
+		fn := L.CheckFunction(2)
+		id := ts.After(delay, func() {
+			if err := L.CallByParam(lua.P{Fn: fn, NRet: 0, Protect: true}); err != nil {
+				lvm.log(slog.LevelError, "TimerService.After callback failed", map[string]any{"error": luaErrMsg(err)})
+			}
+		})
+		L.Push(lua.LNumber(id))
+		return 1
+	}))
+
+	// TimerService.Scripting.Every(seconds, fn) -> id
+	L.SetField(scripting, "Every", L.NewFunction(func(L *lua.LState) int {
+		interval := time.Duration(float64(L.CheckNumber(1)) * float64(time.Second))
+		fn := L.CheckFunction(2)
+		id := ts.Every(interval, func() {
+			if err := L.CallByParam(lua.P{Fn: fn, NRet: 0, Protect: true}); err != nil {
+				lvm.log(slog.LevelError, "TimerService.Every callback failed", map[string]any{"error": luaErrMsg(err)})
+			}
+		})
+		L.Push(lua.LNumber(id))
+		return 1
+	}))
+
+	// TimerService.Scripting.Cancel(id)
+	L.SetField(scripting, "Cancel", L.NewFunction(func(L *lua.LState) int {
+		id := TimerID(L.CheckNumber(1))
+		ts.Cancel(id)
+		return 0
+	}))
+
+	scriptingParent := L.NewTable()
+	L.SetField(scriptingParent, "Scripting", scripting)
+	L.SetGlobal("TimerService", scriptingParent)
+}
+
 // Lua ↔ Go conversion helpers
 // ---------------------------------------------------------------------------
 
@@ -617,12 +808,60 @@ func isArrayTable(t *lua.LTable) bool {
 	return arrayLike && count == t.Len()
 }
 
+// entitySupportsActionLua checks if action is in the actions slice.
+// Returns true if actions is empty (no capability data).
+func entitySupportsActionLua(actions []string, action string) bool {
+	if len(actions) == 0 {
+		return true
+	}
+	for _, a := range actions {
+		if a == action {
+			return true
+		}
+	}
+	return false
+}
+
 func entityToTable(L *lua.LState, e types.Entity) *lua.LTable {
 	t := L.NewTable()
 	L.SetField(t, "ID", lua.LString(e.ID))
 	L.SetField(t, "PluginID", lua.LString(e.PluginID))
 	L.SetField(t, "DeviceID", lua.LString(e.DeviceID))
 	L.SetField(t, "Domain", lua.LString(e.Domain))
+
+	if len(e.Actions) > 0 {
+		at := L.NewTable()
+		for i, a := range e.Actions {
+			L.RawSetInt(at, i+1, lua.LString(a))
+		}
+		L.SetField(t, "Actions", at)
+	}
+
+	// e:Supports("action") — checks if action is in e.Actions
+	actions := e.Actions
+	L.SetField(t, "Supports", L.NewFunction(func(L *lua.LState) int {
+		// Supports colon syntax e:Supports("x") where arg1=self, arg2=action
+		// and dot syntax e.Supports("x") where arg1=action
+		var action string
+		if s, ok := L.Get(1).(lua.LString); ok {
+			action = string(s)
+		} else {
+			action = L.CheckString(2)
+		}
+		if len(actions) == 0 {
+			L.Push(lua.LTrue) // no capability data — assume supported
+			return 1
+		}
+		for _, a := range actions {
+			if a == action {
+				L.Push(lua.LTrue)
+				return 1
+			}
+		}
+		L.Push(lua.LFalse)
+		return 1
+	}))
+
 	if len(e.Data.Effective) > 0 {
 		var m map[string]any
 		if json.Unmarshal(e.Data.Effective, &m) == nil {

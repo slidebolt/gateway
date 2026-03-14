@@ -9,10 +9,10 @@ require (
 	github.com/mark3labs/mcp-go v0.44.1
 	github.com/nats-io/nats-server/v2 v2.12.5
 	github.com/nats-io/nats.go v1.49.0
-	github.com/slidebolt/registry v0.0.1
-	github.com/slidebolt/sdk-entities v1.20.1
-	github.com/slidebolt/sdk-runner v1.20.3
-	github.com/slidebolt/sdk-types v1.20.4
+	github.com/slidebolt/registry v0.0.2
+	github.com/slidebolt/sdk-entities v1.20.2
+	github.com/slidebolt/sdk-runner v1.20.4
+	github.com/slidebolt/sdk-types v1.20.5
 	github.com/swaggo/swag v1.16.6
 	github.com/yuin/gopher-lua v1.1.1
 	modernc.org/sqlite v1.39.0

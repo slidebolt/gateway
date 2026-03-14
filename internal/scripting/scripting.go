@@ -17,6 +17,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/url"
 	"strings"
 	"time"
@@ -50,6 +51,16 @@ type Subscription interface {
 	Unsubscribe() error
 }
 
+// TimerID is a unique identifier for a scheduled task.
+type TimerID int64
+
+// TimerService defines the interface for scheduling future or recurring work.
+type TimerService interface {
+	After(d time.Duration, fn func()) TimerID
+	Every(d time.Duration, fn func()) TimerID
+	Cancel(id TimerID)
+}
+
 // ---------------------------------------------------------------------------
 // Services — one instance per VM, injected via NewVM.
 // ---------------------------------------------------------------------------
@@ -59,6 +70,9 @@ type Services struct {
 	Commands CommandSubmitter
 	Finder   EntityFinder
 	Bus      EventBus
+	Logger   *slog.Logger
+	Timers   TimerService
+	StartLua func(entity types.Entity, source string, svc Services) (*LuaVM, error)
 }
 
 // ---------------------------------------------------------------------------
@@ -186,21 +200,32 @@ func NewQueryScripting(f EntityFinder) *QueryScripting { return newQueryScriptin
 // Find accepts a query string ("?domain=light&label=Home:Basement") or an
 // empty string (returns all entities) and returns an EntityList.
 func (q *QueryScripting) Find(queryStr string) (EntityList, error) {
-	sq, err := parseSearchQuery(queryStr)
+	sq, actions, err := parseSearchQuery(queryStr)
 	if err != nil {
 		return nil, err
 	}
-	return EntityList(q.finder.FindEntities(sq)), nil
+	entities := EntityList(q.finder.FindEntities(sq))
+	if len(actions) > 0 {
+		entities = entities.Where(func(e types.Entity) bool {
+			return entitySupportsAllActions(e, actions)
+		})
+	}
+	return entities, nil
 }
 
 // FindOne returns the first matching entity or nil.
 func (q *QueryScripting) FindOne(queryStr string) (*types.Entity, error) {
-	sq, err := parseSearchQuery(queryStr)
+	sq, actions, err := parseSearchQuery(queryStr)
 	if err != nil {
 		return nil, err
 	}
 	sq.Limit = 1
-	entities := q.finder.FindEntities(sq)
+	entities := EntityList(q.finder.FindEntities(sq))
+	if len(actions) > 0 {
+		entities = entities.Where(func(e types.Entity) bool {
+			return entitySupportsAllActions(e, actions)
+		})
+	}
 	if len(entities) == 0 {
 		return nil, nil
 	}
@@ -208,16 +233,16 @@ func (q *QueryScripting) FindOne(queryStr string) (*types.Entity, error) {
 	return &e, nil
 }
 
-func parseSearchQuery(s string) (types.SearchQuery, error) {
+func parseSearchQuery(s string) (types.SearchQuery, []string, error) {
 	if s == "" || s == "*" {
-		return types.SearchQuery{}, nil
+		return types.SearchQuery{}, nil, nil
 	}
 	if !strings.HasPrefix(s, "?") {
-		return types.SearchQuery{}, fmt.Errorf("scripting: query string must start with '?' or be empty, got %q", s)
+		return types.SearchQuery{}, nil, fmt.Errorf("scripting: query string must start with '?' or be empty, got %q", s)
 	}
 	params, err := url.ParseQuery(s[1:])
 	if err != nil {
-		return types.SearchQuery{}, fmt.Errorf("scripting: parse query %q: %w", s, err)
+		return types.SearchQuery{}, nil, fmt.Errorf("scripting: parse query %q: %w", s, err)
 	}
 	q := types.SearchQuery{}
 	q.Domain = params.Get("domain")
@@ -228,7 +253,8 @@ func parseSearchQuery(s string) (types.SearchQuery, error) {
 	if labels := params["label"]; len(labels) > 0 {
 		q.Labels = types.ParseLabels(labels)
 	}
-	return q, nil
+	actions := params["action"]
+	return q, actions, nil
 }
 
 // EntityList is a slice of entities with scripting conveniences.
@@ -261,6 +287,27 @@ func (l EntityList) First() *types.Entity {
 	}
 	e := l[0]
 	return &e
+}
+
+// entitySupportsAllActions returns true if e.Actions contains every action in required.
+// If e.Actions is empty, returns true (no capability data — allow through).
+func entitySupportsAllActions(e types.Entity, required []string) bool {
+	if len(e.Actions) == 0 {
+		return true
+	}
+	for _, req := range required {
+		found := false
+		for _, a := range e.Actions {
+			if a == req {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
 }
 
 // ---------------------------------------------------------------------------

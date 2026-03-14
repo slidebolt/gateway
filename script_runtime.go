@@ -8,6 +8,7 @@ import (
 
 	"github.com/nats-io/nats.go"
 	gwscripting "github.com/slidebolt/gateway/internal/scripting"
+	"github.com/slidebolt/sdk-types"
 )
 
 type scriptManager struct {
@@ -25,6 +26,9 @@ func ensureScriptRuntime() {
 			Commands: commandService,
 			Finder:   registryService,
 			Bus:      natsEventBus{nc: nc},
+			Logger:   slog.Default(),
+			Timers:   gwscripting.NewOSTimerService(),
+			StartLua: gwscripting.NewLuaVM,
 		},
 		vms: make(map[string]*gwscripting.LuaVM),
 	}
@@ -52,13 +56,21 @@ func (m *scriptManager) Install(pluginID, deviceID, entityID, source string) err
 		return err
 	}
 	entity.PluginID = pluginID
+	_, err = m.InstallVM(entity, source)
+	return err
+}
 
+// InstallVM starts a LuaVM for an already-resolved entity and registers it.
+// Used by tests and internal code that has an entity object already.
+func (m *scriptManager) InstallVM(entity types.Entity, source string) (*gwscripting.LuaVM, error) {
+	if m == nil {
+		return nil, nil
+	}
 	vm, err := gwscripting.NewLuaVM(entity, source, m.svc)
 	if err != nil {
-		return err
+		return nil, err
 	}
-
-	key := scriptKey(pluginID, deviceID, entityID)
+	key := scriptKey(entity.PluginID, entity.DeviceID, entity.ID)
 	m.mu.Lock()
 	old := m.vms[key]
 	m.vms[key] = vm
@@ -66,7 +78,7 @@ func (m *scriptManager) Install(pluginID, deviceID, entityID, source string) err
 	if old != nil {
 		old.Stop()
 	}
-	return nil
+	return vm, nil
 }
 
 func (m *scriptManager) Remove(pluginID, deviceID, entityID string) {

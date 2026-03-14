@@ -28,6 +28,7 @@ type luaState struct {
 	namedSources map[string]string            // VM name → source
 	currentSrc   string                       // current unnamed script
 	lastVM       *scripting.LuaVM             // last started (unnamed)
+	lastEntity   types.Entity                 // entity for last started VM
 	lastVMErr    error                        // error from last start
 	broadcastVMs []*scripting.LuaVM           // for 10-VM integration tests
 }
@@ -83,6 +84,7 @@ func iStartTheLuaVM(ctx context.Context) (context.Context, error) {
 	entity := sc.finder.entities[0]
 	vm, err := scripting.NewLuaVM(entity, ls.currentSrc, sc.svc)
 	ls.lastVM = vm
+	ls.lastEntity = entity
 	ls.lastVMErr = err
 	if vm != nil {
 		ls.vms["_last"] = vm
@@ -103,6 +105,7 @@ func iStartTheLuaVMForEntity(ctx context.Context, entityID string) (context.Cont
 	}
 	vm, err := scripting.NewLuaVM(*entity, ls.currentSrc, sc.svc)
 	ls.lastVM = vm
+	ls.lastEntity = *entity
 	ls.lastVMErr = err
 	if vm != nil {
 		ls.vms["_last"] = vm
@@ -273,6 +276,15 @@ func eachVMHasLuaGlobalEqualTo1(ctx context.Context, globalName string) error {
 	return nil
 }
 
+func iExecuteTheLuaCode(ctx context.Context, code string) error {
+	ls := getLuaState(ctx)
+	if ls == nil || ls.lastVM == nil {
+		return fmt.Errorf("no Lua VM active")
+	}
+	_, err := ls.lastVM.ExecLua(code)
+	return err
+}
+
 // ---------------------------------------------------------------------------
 // Lua global assertions
 // ---------------------------------------------------------------------------
@@ -337,6 +349,21 @@ func theLuaGlobalIsTrue(ctx context.Context, name string) error {
 	return nil
 }
 
+func theLuaGlobalIsFalse(ctx context.Context, name string) error {
+	ls := getLuaState(ctx)
+	if ls == nil || ls.lastVM == nil {
+		return fmt.Errorf("no Lua VM active")
+	}
+	b, err := ls.lastVM.GetGlobalBool(name)
+	if err != nil {
+		return err
+	}
+	if b {
+		return fmt.Errorf("Lua global %q is true, expected false", name)
+	}
+	return nil
+}
+
 func theLuaGlobalIsATableWithEntries(ctx context.Context, name string, count int) error {
 	ls := getLuaState(ctx)
 	if ls == nil || ls.lastVM == nil {
@@ -379,6 +406,33 @@ func vmHasLuaGlobalEqualToNumber(ctx context.Context, vmName, globalName string,
 		return fmt.Errorf("VM %q: %w", vmName, err)
 	}
 	return fmt.Errorf("VM %q global %q = %v, expected %d", vmName, globalName, n, want)
+}
+
+func theLuaGlobalEqualsAfterWaitingSeconds(ctx context.Context, globalName string, want int, seconds int) error {
+	time.Sleep(time.Duration(seconds) * time.Second)
+	return theLuaGlobalEqualsNumber(ctx, globalName, want)
+}
+
+func iWaitSeconds(ctx context.Context, seconds int) error {
+	time.Sleep(time.Duration(seconds) * time.Second)
+	return nil
+}
+
+func theLuaGlobalEventuallyEqualsNumber(ctx context.Context, name string, want int) error {
+	ls := getLuaState(ctx)
+	if ls == nil || ls.lastVM == nil {
+		return fmt.Errorf("no Lua VM active")
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		n, err := ls.lastVM.GetGlobalNumber(name)
+		if err == nil && int(n) == want {
+			return nil
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	n, _ := ls.lastVM.GetGlobalNumber(name)
+	return fmt.Errorf("Lua global %q = %v, expected %d (timed out)", name, n, want)
 }
 
 // ---------------------------------------------------------------------------
@@ -431,6 +485,20 @@ var _ = (*atomic.Int64)(nil) // ensure atomic is imported
 // Step registration
 // ---------------------------------------------------------------------------
 
+func iUpdateTheLuaScript(ctx context.Context, source string) error {
+	ls := getLuaState(ctx)
+	if ls == nil || ls.lastVM == nil {
+		return fmt.Errorf("no Lua VM active")
+	}
+	ls.lastVM.VM.Stop()
+	vm, err := scriptRuntime.InstallVM(ls.lastEntity, strings.TrimSpace(source))
+	if err != nil {
+		return err
+	}
+	ls.lastVM = vm
+	return nil
+}
+
 func registerScriptingLuaSteps(sc *godog.ScenarioContext) {
 	// Cleanup: stop all LuaVMs after the scenario.
 	sc.After(func(ctx context.Context, scenario *godog.Scenario, err error) (context.Context, error) {
@@ -465,6 +533,8 @@ func registerScriptingLuaSteps(sc *godog.ScenarioContext) {
 	sc.Step(`^10 Lua VMs each subscribing to wildcard events$`, given10LuaVMsEachSubscribingToWildcardEvents)
 	sc.Step(`^10 Lua VMs each sending a command on init$`, given10LuaVMsEachSendingACommandOnInit)
 	sc.Step(`^I dispatch command "([^"]*)" to entity "([^"]*)" via the binding$`, iDispatchCommandToEntityViaTheBinding)
+	sc.Step(`^I execute the Lua code "([^"]*)"$`, iExecuteTheLuaCode)
+	sc.Step(`^I update the Lua script:$`, iUpdateTheLuaScript)
 
 	// VM lifecycle assertions
 	sc.Step(`^the VM starts without error$`, theVMStartsWithoutError)
@@ -475,9 +545,13 @@ func registerScriptingLuaSteps(sc *godog.ScenarioContext) {
 
 	// Lua global assertions (unnamed/last VM)
 	sc.Step(`^the Lua global "([^"]*)" equals (\d+)$`, theLuaGlobalEqualsNumber)
+	sc.Step(`^the Lua global "([^"]*)" eventually equals (\d+)$`, theLuaGlobalEventuallyEqualsNumber)
+	sc.Step(`^the Lua global "([^"]*)" equals (\d+) after waiting (\d+) seconds$`, theLuaGlobalEqualsAfterWaitingSeconds)
+	sc.Step(`^I wait (\d+) seconds$`, iWaitSeconds)
 	sc.Step(`^the Lua global "([^"]*)" equals "([^"]*)"$`, theLuaGlobalEqualsString)
 	sc.Step(`^the Lua global "([^"]*)" is not empty$`, theLuaGlobalIsNotEmpty)
 	sc.Step(`^the Lua global "([^"]*)" is true$`, theLuaGlobalIsTrue)
+	sc.Step(`^the Lua global "([^"]*)" is false$`, theLuaGlobalIsFalse)
 	sc.Step(`^the Lua global "([^"]*)" is a table with (\d+) entries$`, theLuaGlobalIsATableWithEntries)
 
 	// Named VM global assertions
