@@ -49,14 +49,16 @@ const defaultDeadline = 5 * time.Second
 // VM wraps a Lua state. All Lua execution happens on the VM's own work-queue
 // goroutine, which makes it safe to deliver events from many NATS goroutines.
 type VM struct {
-	entity  types.Entity
-	source  string
-	svc     Services
-	ctx     context.Context
-	cancel  context.CancelFunc
-	work    chan workItem
-	done    chan struct{}
-	started bool
+	entity    types.Entity
+	source    string
+	scriptRef string
+	sessionID string
+	svc       Services
+	ctx       context.Context
+	cancel    context.CancelFunc
+	work      chan workItem
+	done      chan struct{}
+	started   bool
 
 	// runOnInit is called during start(). Defaults to a no-op; LuaVM overrides it.
 	runOnInit func() error

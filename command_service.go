@@ -124,12 +124,15 @@ func (s *Command) Submit(pluginID, deviceID, entityID string, payload json.RawMe
 		scriptRuntime.NotifyCommand(pluginID, deviceID, entityID, payload)
 	}
 
-	if ent.CommandQuery != nil {
+	if ent.CommandQuery != nil && commandMatchesFilter(cmd.Type, ent.CommandFilter) {
 		// Query-backed group entity: the entire fan-out tree runs on a single
 		// goroutine so the visited set is never touched concurrently (no races, no
 		// new goroutines spawned inside the tree). Group entities are virtual
 		// routers and can belong to any plugin; they do not receive an additional
 		// direct plugin RPC after fan-out.
+		//
+		// If CommandFilter is set and the command type is not in the filter, this
+		// branch is skipped and the command falls through to direct plugin RPC.
 		go func() {
 			visited := map[string]bool{entityVisitKey(pluginID, deviceID, entityID): true}
 			s.fanOut(visited, *ent.CommandQuery, payload)
@@ -190,7 +193,7 @@ func (s *Command) dispatchFanOutEntity(visited map[string]bool, ent types.Entity
 		scriptRuntime.NotifyCommand(ent.PluginID, ent.DeviceID, ent.ID, payload)
 	}
 
-	if ent.CommandQuery != nil {
+	if ent.CommandQuery != nil && commandMatchesFilter(action, ent.CommandFilter) {
 		// Nested query-backed group: recurse synchronously (same goroutine, shared
 		// visited set), then mark the virtual group command complete.
 		s.fanOut(visited, *ent.CommandQuery, payload)
@@ -217,4 +220,19 @@ func (s *Command) dispatchFanOutEntity(visited map[string]bool, ent types.Entity
 // (no backing plugin on NATS).
 func isGatewayOwned(pluginID string) bool {
 	return pluginID == "" || pluginID == gatewayPluginID
+}
+
+// commandMatchesFilter reports whether cmdType should be handled by CommandQuery
+// fan-out. If filter is empty, all commands match (backward-compatible default).
+// Otherwise only commands explicitly listed in filter match.
+func commandMatchesFilter(cmdType string, filter []string) bool {
+	if len(filter) == 0 {
+		return true
+	}
+	for _, f := range filter {
+		if f == cmdType {
+			return true
+		}
+	}
+	return false
 }

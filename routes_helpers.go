@@ -22,7 +22,8 @@ type EntityResponse struct {
 	Data         types.EntityData                `json:"data"`
 	Labels       map[string][]string             `json:"labels,omitempty"`
 	Snapshots    map[string]types.EntitySnapshot `json:"snapshots,omitempty"`
-	CommandQuery *types.SearchQuery              `json:"command_query,omitempty"`
+	CommandQuery  *types.SearchQuery              `json:"command_query,omitempty"`
+	CommandFilter []string                        `json:"command_filter,omitempty"`
 	Meta         map[string]json.RawMessage      `json:"meta,omitempty"`
 	DomainSchema *types.DomainDescriptor         `json:"schema,omitempty"`
 }
@@ -39,7 +40,8 @@ func toEntityResponse(e types.Entity) EntityResponse {
 		Data:         e.Data,
 		Labels:       e.Labels,
 		Snapshots:    e.Snapshots,
-		CommandQuery: e.CommandQuery,
+		CommandQuery:  e.CommandQuery,
+		CommandFilter: e.CommandFilter,
 		Meta:         e.Meta,
 	}
 	if desc, ok := types.GetDomainDescriptor(e.Domain); ok {

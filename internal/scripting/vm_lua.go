@@ -9,6 +9,8 @@ import (
 	"sync"
 	"time"
 
+	lightdomain "github.com/slidebolt/sdk-entities/light"
+	lightstripdomain "github.com/slidebolt/sdk-entities/light_strip"
 	"github.com/slidebolt/sdk-types"
 	lua "github.com/yuin/gopher-lua"
 )
@@ -20,18 +22,44 @@ import (
 // LuaVM wraps a VM and adds a live *lua.LState. Created via NewLuaVM.
 type LuaVM struct {
 	*VM
-	L        *lua.LState
-	stopOnce sync.Once
+	L              *lua.LState
+	stopOnce       sync.Once
+	definedScripts map[string]*lua.LFunction
+	entrypoint     string
+}
+
+type ScriptInstance struct {
+	Entrypoint string
+	ScriptRef  string
+	SessionID  string
+}
+
+type stripMemberRef struct {
+	PluginID string `json:"plugin_id"`
+	DeviceID string `json:"device_id"`
+	EntityID string `json:"entity_id"`
+	Index    int    `json:"index"`
 }
 
 // NewLuaVM creates a VM with a fully initialised Lua state, injects all
 // scripting bindings, and calls OnInit. The caller must call Stop().
 func NewLuaVM(entity types.Entity, source string, svc Services) (*LuaVM, error) {
-	return newLuaVM(entity, source, svc)
+	return newLuaVM(entity, source, ScriptInstance{}, svc)
+}
+
+// NewLuaVMWithEntrypoint creates a VM and invokes the named script entry
+// registered via DefineScript after the source is loaded.
+func NewLuaVMWithEntrypoint(entity types.Entity, source, entrypoint string, svc Services) (*LuaVM, error) {
+	return newLuaVM(entity, source, ScriptInstance{Entrypoint: entrypoint}, svc)
+}
+
+// NewLuaVMWithInstance creates a VM with child-script instance metadata.
+func NewLuaVMWithInstance(entity types.Entity, source string, inst ScriptInstance, svc Services) (*LuaVM, error) {
+	return newLuaVM(entity, source, inst, svc)
 }
 
 // newLuaVM is the real constructor.
-func newLuaVM(entity types.Entity, source string, svc Services) (*LuaVM, error) {
+func newLuaVM(entity types.Entity, source string, inst ScriptInstance, svc Services) (*LuaVM, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cmds := newCommandScripting(svc.Commands)
 	evts := newEventScriptingWithFinder(svc.Bus, svc.Finder)
@@ -40,19 +68,23 @@ func newLuaVM(entity types.Entity, source string, svc Services) (*LuaVM, error) 
 
 	lvm := &LuaVM{
 		VM: &VM{
-			entity:   entity,
-			source:   source,
-			svc:      svc,
-			ctx:      ctx,
-			cancel:   cancel,
-			work:     make(chan workItem, 64),
-			done:     make(chan struct{}),
-			This:     newEntityBinding(entity, cmds, evts),
-			Query:    newQueryScripting(svc.Finder),
-			Commands: cmds,
-			Events:   evts,
+			entity:    entity,
+			source:    source,
+			scriptRef: inst.ScriptRef,
+			sessionID: inst.SessionID,
+			svc:       svc,
+			ctx:       ctx,
+			cancel:    cancel,
+			work:      make(chan workItem, 64),
+			done:      make(chan struct{}),
+			This:      newEntityBinding(entity, cmds, evts),
+			Query:     newQueryScripting(svc.Finder),
+			Commands:  cmds,
+			Events:    evts,
 		},
-		L: L,
+		L:              L,
+		definedScripts: make(map[string]*lua.LFunction),
+		entrypoint:     inst.Entrypoint,
 	}
 	lvm.VM.Timers = newTimerScripting(lvm.VM, svc.Timers)
 
@@ -118,6 +150,16 @@ func (lvm *LuaVM) execOnInit() error {
 	lvm.L.Push(fn)
 	if err := lvm.L.PCall(0, lua.MultRet, nil); err != nil {
 		return fmt.Errorf("scripting: Lua exec error in %s: %w", chunkName, err)
+	}
+
+	if lvm.entrypoint != "" {
+		entryFn, ok := lvm.definedScripts[lvm.entrypoint]
+		if !ok {
+			return fmt.Errorf("scripting: entrypoint %q not defined in %s", lvm.entrypoint, chunkName)
+		}
+		if err := lvm.L.CallByParam(lua.P{Fn: entryFn, NRet: 0, Protect: true}); err != nil {
+			return fmt.Errorf("scripting: Lua entrypoint error: %w", err)
+		}
 	}
 
 	// Call OnInit(ctx_table) if defined.
@@ -252,8 +294,19 @@ func (lvm *LuaVM) injectBindings() {
 	// ParseLabels — types.ParseLabels exposed directly.
 	L.SetGlobal("ParseLabels", L.NewFunction(lvm.luaParseLabels))
 
+	// DefineScript(name, fn) registers a named entrypoint within this source.
+	L.SetGlobal("DefineScript", L.NewFunction(func(L *lua.LState) int {
+		name := L.CheckString(1)
+		fn := L.CheckFunction(2)
+		lvm.definedScripts[name] = fn
+		return 0
+	}))
+
 	// This — EntityBinding
 	lvm.injectThis()
+
+	// Domain helpers — injected based on entity domain.
+	lvm.injectDomainHelpers()
 
 	// QueryService.Scripting
 	lvm.injectQueryService()
@@ -269,6 +322,161 @@ func (lvm *LuaVM) injectBindings() {
 
 	// TimerService.Scripting
 	lvm.injectTimerService()
+}
+
+func (lvm *LuaVM) injectDomainHelpers() {
+	switch lvm.VM.entity.Domain {
+	case lightdomain.Type:
+		lvm.injectLightHelpers()
+	case lightstripdomain.Type:
+		lvm.injectStripHelpers()
+	}
+}
+
+func (lvm *LuaVM) injectLightHelpers() {
+	L := lvm.L
+	light := L.NewTable()
+	this := lvm.VM.This
+
+	send := func(action string, params map[string]any) int {
+		cmdID, err := this.SendCommand(action, params)
+		if err != nil {
+			L.RaiseError("Light.%s: %s", action, err)
+			return 0
+		}
+		L.Push(lua.LString(cmdID))
+		return 1
+	}
+
+	L.SetField(light, "On", L.NewFunction(func(L *lua.LState) int {
+		return send(lightdomain.ActionTurnOn, nil)
+	}))
+	L.SetField(light, "Off", L.NewFunction(func(L *lua.LState) int {
+		return send(lightdomain.ActionTurnOff, nil)
+	}))
+	L.SetField(light, "SetBrightness", L.NewFunction(func(L *lua.LState) int {
+		return send(lightdomain.ActionSetBrightness, map[string]any{"brightness": int(L.CheckNumber(1))})
+	}))
+	L.SetField(light, "SetRGB", L.NewFunction(func(L *lua.LState) int {
+		return send(lightdomain.ActionSetRGB, map[string]any{"rgb": intsFromLuaTable(L, L.CheckTable(1))})
+	}))
+	L.SetField(light, "SetTemperature", L.NewFunction(func(L *lua.LState) int {
+		return send(lightdomain.ActionSetTemperature, map[string]any{"temperature": int(L.CheckNumber(1))})
+	}))
+	L.SetField(light, "SoftWhite", L.NewFunction(func(L *lua.LState) int {
+		brightness := int(L.CheckNumber(1))
+		if _, err := this.SendCommand(lightdomain.ActionSetBrightness, map[string]any{"brightness": brightness}); err != nil {
+			L.RaiseError("Light.SoftWhite brightness: %s", err)
+			return 0
+		}
+		cmdID, err := this.SendCommand(lightdomain.ActionSetTemperature, map[string]any{"temperature": 3000})
+		if err != nil {
+			L.RaiseError("Light.SoftWhite temperature: %s", err)
+			return 0
+		}
+		L.Push(lua.LString(cmdID))
+		return 1
+	}))
+
+	L.SetGlobal("Light", light)
+}
+
+func (lvm *LuaVM) injectStripHelpers() {
+	L := lvm.L
+	strip := L.NewTable()
+
+	sendToMembers := func(action string, params map[string]any) int {
+		members, err := lvm.stripMembers()
+		if err != nil {
+			L.RaiseError("Strip.%s: %s", action, err)
+			return 0
+		}
+		lastID := ""
+		for _, member := range members {
+			cmdID, err := lvm.VM.Commands.SendTo(member.PluginID, member.DeviceID, member.EntityID, action, params)
+			if err != nil {
+				L.RaiseError("Strip.%s member %s/%s/%s: %s", action, member.PluginID, member.DeviceID, member.EntityID, err)
+				return 0
+			}
+			lastID = cmdID
+		}
+		L.Push(lua.LString(lastID))
+		return 1
+	}
+
+	sendToSegment := func(index int, action string, params map[string]any) int {
+		members, err := lvm.stripMembers()
+		if err != nil {
+			L.RaiseError("Strip.%s: %s", action, err)
+			return 0
+		}
+		for _, member := range members {
+			if member.Index != index {
+				continue
+			}
+			cmdID, err := lvm.VM.Commands.SendTo(member.PluginID, member.DeviceID, member.EntityID, action, params)
+			if err != nil {
+				L.RaiseError("Strip.%s member %s/%s/%s: %s", action, member.PluginID, member.DeviceID, member.EntityID, err)
+				return 0
+			}
+			L.Push(lua.LString(cmdID))
+			return 1
+		}
+		L.RaiseError("Strip.%s: no member at index %d", action, index)
+		return 0
+	}
+
+	L.SetField(strip, "On", L.NewFunction(func(L *lua.LState) int {
+		return sendToMembers(lightdomain.ActionTurnOn, nil)
+	}))
+	L.SetField(strip, "Off", L.NewFunction(func(L *lua.LState) int {
+		return sendToMembers(lightdomain.ActionTurnOff, nil)
+	}))
+	L.SetField(strip, "SetBrightness", L.NewFunction(func(L *lua.LState) int {
+		return sendToMembers(lightdomain.ActionSetBrightness, map[string]any{"brightness": int(L.CheckNumber(1))})
+	}))
+	L.SetField(strip, "SetRGB", L.NewFunction(func(L *lua.LState) int {
+		return sendToMembers(lightdomain.ActionSetRGB, map[string]any{"rgb": intsFromLuaTable(L, L.CheckTable(1))})
+	}))
+	L.SetField(strip, "Fill", L.NewFunction(func(L *lua.LState) int {
+		return sendToMembers(lightdomain.ActionSetRGB, map[string]any{"rgb": intsFromLuaTable(L, L.CheckTable(1))})
+	}))
+	L.SetField(strip, "SetSegment", L.NewFunction(func(L *lua.LState) int {
+		index := int(L.CheckNumber(1))
+		rgb := intsFromLuaTable(L, L.CheckTable(2))
+		return sendToSegment(index, lightdomain.ActionSetRGB, map[string]any{"rgb": rgb})
+	}))
+	L.SetField(strip, "Length", L.NewFunction(func(L *lua.LState) int {
+		members, err := lvm.stripMembers()
+		if err != nil {
+			L.Push(lua.LNumber(0))
+			return 1
+		}
+		L.Push(lua.LNumber(len(members)))
+		return 1
+	}))
+
+	L.SetGlobal("Strip", strip)
+}
+
+func (lvm *LuaVM) stripMembers() ([]stripMemberRef, error) {
+	raw, ok := lvm.VM.entity.Meta["strip_members"]
+	if !ok || len(raw) == 0 {
+		return nil, fmt.Errorf("entity %s has no strip_members meta", lvm.VM.entity.ID)
+	}
+	var members []stripMemberRef
+	if err := json.Unmarshal(raw, &members); err != nil {
+		return nil, err
+	}
+	return members, nil
+}
+
+func intsFromLuaTable(L *lua.LState, t *lua.LTable) []int {
+	out := make([]int, 0, t.Len())
+	t.ForEach(func(_ lua.LValue, v lua.LValue) {
+		out = append(out, int(lua.LVAsNumber(v)))
+	})
+	return out
 }
 
 // ---------------------------------------------------------------------------
@@ -382,6 +590,72 @@ func (lvm *LuaVM) injectThis() {
 		}
 		L.Push(goToLua(L, v))
 		return 1
+	}))
+
+	L.SetField(t, "SessionID", L.NewFunction(func(L *lua.LState) int {
+		if lvm.VM.sessionID == "" {
+			L.Push(lua.LNil)
+			return 1
+		}
+		L.Push(lua.LString(lvm.VM.sessionID))
+		return 1
+	}))
+
+	L.SetField(t, "LoadSession", L.NewFunction(func(L *lua.LState) int {
+		if lvm.VM.sessionID == "" || lvm.VM.svc.Sessions == nil {
+			L.Push(lua.LNil)
+			return 1
+		}
+		state, ok := lvm.VM.svc.Sessions.LoadSession(lvm.VM.sessionID)
+		if !ok || state == nil {
+			L.Push(lua.LNil)
+			return 1
+		}
+		L.Push(mapToTable(L, state))
+		return 1
+	}))
+
+	L.SetField(t, "SaveSession", L.NewFunction(func(L *lua.LState) int {
+		if lvm.VM.sessionID == "" || lvm.VM.svc.Sessions == nil {
+			L.RaiseError("This.SaveSession: no active session")
+			return 0
+		}
+		payload := tableToMap(L, L.CheckTable(1))
+		if err := lvm.VM.svc.Sessions.SaveSession(lvm.VM.sessionID, payload); err != nil {
+			L.RaiseError("This.SaveSession: %s", err)
+			return 0
+		}
+		return 0
+	}))
+
+	// This.RunScript(name) -> instanceID
+	L.SetField(t, "RunScript", L.NewFunction(func(L *lua.LState) int {
+		name := L.CheckString(1)
+		if lvm.VM.svc.Scripts == nil {
+			L.RaiseError("This.RunScript: script controller unavailable")
+			return 0
+		}
+		instanceID, err := lvm.VM.svc.Scripts.Run(this.Entity, name)
+		if err != nil {
+			L.RaiseError("This.RunScript: %s", err)
+			return 0
+		}
+		L.Push(lua.LString(instanceID))
+		return 1
+	}))
+
+	// This.StopScript(instanceID)
+	L.SetField(t, "StopScript", L.NewFunction(func(L *lua.LState) int {
+		instanceID := L.CheckString(1)
+		if lvm.VM.svc.Scripts == nil {
+			L.RaiseError("This.StopScript: script controller unavailable")
+			return 0
+		}
+		if err := lvm.VM.svc.Scripts.StopScript(this.Entity, instanceID); err != nil {
+			L.RaiseError("This.StopScript: %s", err)
+			return 0
+		}
+		return 0
 	}))
 
 	L.SetGlobal("This", t)

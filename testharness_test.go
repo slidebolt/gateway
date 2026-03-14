@@ -699,7 +699,12 @@ func (p *SimulatedPlugin) SeedRegistry() error {
 // plugin asking the system for entities. This bypasses the HTTP gateway,
 // proving the NATS-level search works end-to-end.
 func (p *SimulatedPlugin) QueryRegistry(q types.SearchQuery) ([]types.Entity, error) {
-	return regsvc.QueryEntities(p.nc, q)
+	reg := regsvc.RegistryService(p.ID+"-query", regsvc.WithPersist(regsvc.PersistNever))
+	if err := reg.AttachNATS(p.nc); err != nil {
+		return nil, err
+	}
+	defer reg.Stop()
+	return reg.FindEntities(q), nil
 }
 
 // seedRegistry is the *testing.T wrapper used by existing unit tests.

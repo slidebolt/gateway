@@ -370,3 +370,128 @@ func TestIntegration_GroupFanoutSkipsUnsupportedLeafActions(t *testing.T) {
 	slices.Sort(entityIDs)
 	t.Fatalf("fanout dispatched to entity IDs %v, want only rgb-light", entityIDs)
 }
+
+// TestIntegration_CommandFilter_FanoutMatchingCommand verifies that a command
+// listed in CommandFilter fans out via CommandQuery to all leaf entities.
+func TestIntegration_CommandFilter_FanoutMatchingCommand(t *testing.T) {
+	h := newAPIHarness(t)
+
+	plugin := &SimulatedPlugin{
+		ID: "strip-plugin",
+		nc: h.NC,
+		Devices: []types.Device{
+			{ID: "bridge", LocalName: "Bridge"},
+		},
+		Entities: []types.Entity{
+			{
+				ID: "leaf-a", PluginID: "strip-plugin", DeviceID: "bridge",
+				Domain: "light", LocalName: "Leaf A",
+				Actions: []string{"turn_on", "turn_off", "set_brightness"},
+				Labels:  map[string][]string{"Group": {"MyStrip"}},
+			},
+			{
+				ID: "leaf-b", PluginID: "strip-plugin", DeviceID: "bridge",
+				Domain: "light", LocalName: "Leaf B",
+				Actions: []string{"turn_on", "turn_off", "set_brightness"},
+				Labels:  map[string][]string{"Group": {"MyStrip"}},
+			},
+			{
+				// Virtual strip entity: turn_on/turn_off fan out; set_segment does not.
+				ID: "my-strip", PluginID: "strip-plugin", DeviceID: "bridge",
+				Domain:    "light_strip",
+				LocalName: "My Strip",
+				CommandQuery: &types.SearchQuery{
+					Labels: map[string][]string{"Group": {"MyStrip"}},
+				},
+				CommandFilter: []string{"turn_on", "turn_off", "set_brightness"},
+			},
+		},
+	}
+	plugin.MustStart(t)
+	t.Cleanup(plugin.Stop)
+	plugin.seedRegistry(t)
+
+	// turn_on IS in CommandFilter → should fan out to both leaves.
+	resp := h.post(t, "/api/plugins/strip-plugin/devices/bridge/entities/my-strip/commands",
+		map[string]any{"type": "turn_on"})
+	assertStatus(t, resp, http.StatusAccepted)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		plugin.mu.RLock()
+		var entityIDs []string
+		for _, status := range plugin.commands {
+			entityIDs = append(entityIDs, status.EntityID)
+		}
+		plugin.mu.RUnlock()
+		slices.Sort(entityIDs)
+		if slices.Equal(entityIDs, []string{"leaf-a", "leaf-b"}) {
+			return
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+
+	plugin.mu.RLock()
+	defer plugin.mu.RUnlock()
+	var entityIDs []string
+	for _, status := range plugin.commands {
+		entityIDs = append(entityIDs, status.EntityID)
+	}
+	slices.Sort(entityIDs)
+	t.Fatalf("CommandFilter: fanout got entity IDs %v, want [leaf-a leaf-b]", entityIDs)
+}
+
+// TestIntegration_CommandFilter_FallThroughUnmatchedCommand verifies that a
+// command NOT listed in CommandFilter bypasses fan-out and goes to the plugin's
+// OnCommand (direct RPC dispatch).
+func TestIntegration_CommandFilter_FallThroughUnmatchedCommand(t *testing.T) {
+	h := newAPIHarness(t)
+
+	plugin := &SimulatedPlugin{
+		ID: "strip-plugin2",
+		nc: h.NC,
+		Devices: []types.Device{
+			{ID: "bridge", LocalName: "Bridge"},
+		},
+		Entities: []types.Entity{
+			{
+				ID: "leaf-a", PluginID: "strip-plugin2", DeviceID: "bridge",
+				Domain:  "light",
+				Actions: []string{"turn_on", "turn_off"},
+				Labels:  map[string][]string{"Group": {"MyStrip2"}},
+			},
+			{
+				// set_segment is NOT in CommandFilter → should hit OnCommand directly.
+				ID: "my-strip2", PluginID: "strip-plugin2", DeviceID: "bridge",
+				Domain:    "light_strip",
+				LocalName: "My Strip 2",
+				Actions:   []string{"turn_on", "turn_off", "set_segment"},
+				CommandQuery: &types.SearchQuery{
+					Labels: map[string][]string{"Group": {"MyStrip2"}},
+				},
+				CommandFilter: []string{"turn_on", "turn_off"},
+			},
+		},
+	}
+	plugin.MustStart(t)
+	t.Cleanup(plugin.Stop)
+	plugin.seedRegistry(t)
+
+	// set_segment is NOT in CommandFilter → should dispatch directly to plugin RPC,
+	// not fan out to leaf-a.
+	resp := h.post(t, "/api/plugins/strip-plugin2/devices/bridge/entities/my-strip2/commands",
+		map[string]any{"type": "set_segment", "segment": map[string]any{"index": 0, "rgb": []int{255, 0, 0}}})
+	assertStatus(t, resp, http.StatusAccepted)
+
+	// Give a brief window and assert leaf-a never received a command.
+	time.Sleep(200 * time.Millisecond)
+
+	plugin.mu.RLock()
+	defer plugin.mu.RUnlock()
+	for _, status := range plugin.commands {
+		if status.EntityID == "leaf-a" {
+			t.Fatalf("CommandFilter: set_segment should NOT have fanned out to leaf-a")
+		}
+	}
+}
+

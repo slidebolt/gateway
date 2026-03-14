@@ -2,12 +2,12 @@
 //
 // Architecture:
 //
-//   ScriptEngine      - factory: creates, starts and stops VMs
-//   VM                - one per script; owns a *lua.LState + work-queue goroutine
-//   EntityBinding     - "This" inside every Lua VM; the single bespoke piece
-//   QueryScripting    - QueryService.Scripting.* bindings
-//   CommandScripting  - CommandService.Scripting.* bindings
-//   EventScripting    - EventService.Scripting.* bindings + subject translation
+//	ScriptEngine      - factory: creates, starts and stops VMs
+//	VM                - one per script; owns a *lua.LState + work-queue goroutine
+//	EntityBinding     - "This" inside every Lua VM; the single bespoke piece
+//	QueryScripting    - QueryService.Scripting.* bindings
+//	CommandScripting  - CommandService.Scripting.* bindings
+//	EventScripting    - EventService.Scripting.* bindings + subject translation
 //
 // All gateway dependencies are injected via interfaces so this package has no
 // concrete imports from the gateway's main package.
@@ -61,6 +61,19 @@ type TimerService interface {
 	Cancel(id TimerID)
 }
 
+// ScriptController manages child script instances spawned from a host script.
+type ScriptController interface {
+	Run(entity types.Entity, name string) (string, error)
+	StopScript(entity types.Entity, instanceID string) error
+}
+
+// SessionStore manages transient, gateway-owned per-script session data.
+type SessionStore interface {
+	LoadSession(sessionID string) (map[string]any, bool)
+	SaveSession(sessionID string, payload map[string]any) error
+	DeleteSession(sessionID string) error
+}
+
 // ---------------------------------------------------------------------------
 // Services — one instance per VM, injected via NewVM.
 // ---------------------------------------------------------------------------
@@ -72,6 +85,8 @@ type Services struct {
 	Bus      EventBus
 	Logger   *slog.Logger
 	Timers   TimerService
+	Scripts  ScriptController
+	Sessions SessionStore
 	StartLua func(entity types.Entity, source string, svc Services) (*LuaVM, error)
 }
 
@@ -90,8 +105,8 @@ type Services struct {
 //	"*"                   – all entity events
 type SubjectFilter struct {
 	raw      string
-	entityID string            // empty = no filter
-	evtType  string            // empty = no filter; "*" = any
+	entityID string             // empty = no filter
+	evtType  string             // empty = no filter; "*" = any
 	query    *types.SearchQuery // non-nil when "?" prefix
 }
 
@@ -480,12 +495,12 @@ func (b *EntityBinding) SendEvent(payload map[string]any) error {
 		return err
 	}
 	env := types.EntityEventEnvelope{
-		PluginID:  b.Entity.PluginID,
-		DeviceID:  b.Entity.DeviceID,
-		EntityID:  b.Entity.ID,
+		PluginID:   b.Entity.PluginID,
+		DeviceID:   b.Entity.DeviceID,
+		EntityID:   b.Entity.ID,
 		EntityType: b.Entity.Domain,
-		Payload:   raw,
-		CreatedAt: time.Now().UTC(),
+		Payload:    raw,
+		CreatedAt:  time.Now().UTC(),
 	}
 	return b.events.Publish(env)
 }
