@@ -3,3 +3,5 @@ gateway
 
 scripts/.release_guard
 TASKS/
+
+**/.env.local
