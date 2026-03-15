@@ -443,6 +443,123 @@ func TestIntegration_CommandFilter_FanoutMatchingCommand(t *testing.T) {
 	t.Fatalf("CommandFilter: fanout got entity IDs %v, want [leaf-a leaf-b]", entityIDs)
 }
 
+// TestIntegration_LightPanel_BroadcastFanOut verifies that a broadcast command
+// (e.g. turn_on) on a light_panel entity fans out to all member leaves via
+// CommandQuery/CommandFilter.
+func TestIntegration_LightPanel_BroadcastFanOut(t *testing.T) {
+	h := newAPIHarness(t)
+
+	plugin := &SimulatedPlugin{
+		ID: "panel-plugin",
+		nc: h.NC,
+		Devices: []types.Device{
+			{ID: "bridge", LocalName: "Bridge"},
+		},
+		Entities: []types.Entity{
+			{
+				ID: "panel-leaf-a", PluginID: "panel-plugin", DeviceID: "bridge",
+				Domain: "light", LocalName: "Panel Leaf A",
+				Actions: []string{"turn_on", "turn_off"},
+				Labels:  map[string][]string{"Group": {"OfficePanel"}},
+			},
+			{
+				ID: "panel-leaf-b", PluginID: "panel-plugin", DeviceID: "bridge",
+				Domain: "light", LocalName: "Panel Leaf B",
+				Actions: []string{"turn_on", "turn_off"},
+				Labels:  map[string][]string{"Group": {"OfficePanel"}},
+			},
+			{
+				ID: "my-panel", PluginID: "panel-plugin", DeviceID: "bridge",
+				Domain: "light_panel", LocalName: "My Panel",
+				CommandQuery: &types.SearchQuery{
+					Labels: map[string][]string{"Group": {"OfficePanel"}},
+				},
+				CommandFilter: []string{"turn_on", "turn_off"},
+			},
+		},
+	}
+	plugin.MustStart(t)
+	t.Cleanup(plugin.Stop)
+	plugin.seedRegistry(t)
+
+	resp := h.post(t, "/api/plugins/panel-plugin/devices/bridge/entities/my-panel/commands",
+		map[string]any{"type": "turn_on"})
+	assertStatus(t, resp, http.StatusAccepted)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		plugin.mu.RLock()
+		var entityIDs []string
+		for _, status := range plugin.commands {
+			entityIDs = append(entityIDs, status.EntityID)
+		}
+		plugin.mu.RUnlock()
+		slices.Sort(entityIDs)
+		if slices.Equal(entityIDs, []string{"panel-leaf-a", "panel-leaf-b"}) {
+			return
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+
+	plugin.mu.RLock()
+	defer plugin.mu.RUnlock()
+	var entityIDs []string
+	for _, status := range plugin.commands {
+		entityIDs = append(entityIDs, status.EntityID)
+	}
+	slices.Sort(entityIDs)
+	t.Fatalf("LightPanel broadcast: got entity IDs %v, want [panel-leaf-a panel-leaf-b]", entityIDs)
+}
+
+// TestIntegration_LightPanel_SetPanelFallThrough verifies that set_panel is NOT
+// in CommandFilter and therefore falls through to the plugin's OnCommand directly.
+func TestIntegration_LightPanel_SetPanelFallThrough(t *testing.T) {
+	h := newAPIHarness(t)
+
+	plugin := &SimulatedPlugin{
+		ID: "panel-plugin2",
+		nc: h.NC,
+		Devices: []types.Device{
+			{ID: "bridge", LocalName: "Bridge"},
+		},
+		Entities: []types.Entity{
+			{
+				ID: "panel-leaf-x", PluginID: "panel-plugin2", DeviceID: "bridge",
+				Domain:  "light",
+				Actions: []string{"turn_on", "turn_off"},
+				Labels:  map[string][]string{"Group": {"OfficePanelB"}},
+			},
+			{
+				// set_panel NOT in CommandFilter → hits OnCommand directly.
+				ID: "my-panel2", PluginID: "panel-plugin2", DeviceID: "bridge",
+				Domain:  "light_panel",
+				Actions: []string{"turn_on", "turn_off", "set_panel"},
+				CommandQuery: &types.SearchQuery{
+					Labels: map[string][]string{"Group": {"OfficePanelB"}},
+				},
+				CommandFilter: []string{"turn_on", "turn_off"},
+			},
+		},
+	}
+	plugin.MustStart(t)
+	t.Cleanup(plugin.Stop)
+	plugin.seedRegistry(t)
+
+	resp := h.post(t, "/api/plugins/panel-plugin2/devices/bridge/entities/my-panel2/commands",
+		map[string]any{"type": "set_panel", "panel": map[string]any{"id": 10, "rgb": []int{255, 0, 0}}})
+	assertStatus(t, resp, http.StatusAccepted)
+
+	time.Sleep(200 * time.Millisecond)
+
+	plugin.mu.RLock()
+	defer plugin.mu.RUnlock()
+	for _, status := range plugin.commands {
+		if status.EntityID == "panel-leaf-x" {
+			t.Fatalf("LightPanel: set_panel should NOT have fanned out to panel-leaf-x")
+		}
+	}
+}
+
 // TestIntegration_CommandFilter_FallThroughUnmatchedCommand verifies that a
 // command NOT listed in CommandFilter bypasses fan-out and goes to the plugin's
 // OnCommand (direct RPC dispatch).

@@ -156,15 +156,25 @@ func saveEntityToRegistry(pluginID, fallbackDeviceID string, raw json.RawMessage
 			ent.DeviceID = fallbackDeviceID
 		}
 		if strings.TrimSpace(ent.DeviceID) != "" {
-			// Preserve gateway-managed meta when the incoming entity doesn't carry it.
-			if ent.Meta == nil && registryService != nil {
+			// Preserve gateway-managed meta and labels when the incoming entity doesn't carry them.
+			if (ent.Meta == nil || len(ent.Labels) == 0) && registryService != nil {
 				if hits := registryService.FindEntities(types.SearchQuery{
 					PluginID: pluginID, EntityID: ent.ID, DeviceID: ent.DeviceID, Limit: 1,
 				}); len(hits) > 0 {
-					ent.Meta = hits[0].Meta
+					if ent.Meta == nil {
+						ent.Meta = hits[0].Meta
+					}
+					if len(ent.Labels) == 0 {
+						ent.Labels = hits[0].Labels
+					}
 				}
 			}
 			_ = reg.SaveEntity(ent)
+			// Also update the aggregate's in-memory cache synchronously so the next
+			// in-process FindEntities call sees the update without waiting for NATS.
+			if registryService != nil {
+				registryService.AbsorbEntity(pluginID, ent)
+			}
 			return
 		}
 	}
@@ -177,15 +187,23 @@ func saveEntityToRegistry(pluginID, fallbackDeviceID string, raw json.RawMessage
 	if strings.TrimSpace(fallback.DeviceID) == "" {
 		return
 	}
-	// Preserve gateway-managed meta in the fallback path too.
-	if fallback.Meta == nil && registryService != nil {
+	// Preserve gateway-managed meta and labels in the fallback path too.
+	if (fallback.Meta == nil || len(fallback.Labels) == 0) && registryService != nil {
 		if hits := registryService.FindEntities(types.SearchQuery{
 			PluginID: pluginID, EntityID: fallback.ID, DeviceID: fallback.DeviceID, Limit: 1,
 		}); len(hits) > 0 {
-			fallback.Meta = hits[0].Meta
+			if fallback.Meta == nil {
+				fallback.Meta = hits[0].Meta
+			}
+			if len(fallback.Labels) == 0 {
+				fallback.Labels = hits[0].Labels
+			}
 		}
 	}
 	_ = reg.SaveEntity(fallback)
+	if registryService != nil {
+		registryService.AbsorbEntity(pluginID, fallback)
+	}
 }
 
 func performEntitySearch(query types.SearchQuery) []types.Entity {

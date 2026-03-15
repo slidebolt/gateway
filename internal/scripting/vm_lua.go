@@ -10,6 +10,7 @@ import (
 	"time"
 
 	lightdomain "github.com/slidebolt/sdk-entities/light"
+	lightpaneldomain "github.com/slidebolt/sdk-entities/light_panel"
 	lightstripdomain "github.com/slidebolt/sdk-entities/light_strip"
 	"github.com/slidebolt/sdk-types"
 	lua "github.com/yuin/gopher-lua"
@@ -39,6 +40,13 @@ type stripMemberRef struct {
 	DeviceID string `json:"device_id"`
 	EntityID string `json:"entity_id"`
 	Index    int    `json:"index"`
+}
+
+type panelMemberRef struct {
+	PluginID string `json:"plugin_id"`
+	DeviceID string `json:"device_id"`
+	EntityID string `json:"entity_id"`
+	PanelID  int    `json:"panel_id"`
 }
 
 // NewLuaVM creates a VM with a fully initialised Lua state, injects all
@@ -330,6 +338,8 @@ func (lvm *LuaVM) injectDomainHelpers() {
 		lvm.injectLightHelpers()
 	case lightstripdomain.Type:
 		lvm.injectStripHelpers()
+	case lightpaneldomain.Type:
+		lvm.injectPanelHelpers()
 	}
 }
 
@@ -457,6 +467,93 @@ func (lvm *LuaVM) injectStripHelpers() {
 	}))
 
 	L.SetGlobal("Strip", strip)
+}
+
+func (lvm *LuaVM) injectPanelHelpers() {
+	L := lvm.L
+	panel := L.NewTable()
+
+	sendToMembers := func(action string, params map[string]any) int {
+		members, err := lvm.panelMembers()
+		if err != nil {
+			L.RaiseError("Panel.%s: %s", action, err)
+			return 0
+		}
+		lastID := ""
+		for _, member := range members {
+			cmdID, err := lvm.VM.Commands.SendTo(member.PluginID, member.DeviceID, member.EntityID, action, params)
+			if err != nil {
+				L.RaiseError("Panel.%s member %s/%s/%s: %s", action, member.PluginID, member.DeviceID, member.EntityID, err)
+				return 0
+			}
+			lastID = cmdID
+		}
+		L.Push(lua.LString(lastID))
+		return 1
+	}
+
+	sendToPanel := func(panelID int, action string, params map[string]any) int {
+		members, err := lvm.panelMembers()
+		if err != nil {
+			L.RaiseError("Panel.%s: %s", action, err)
+			return 0
+		}
+		for _, member := range members {
+			if member.PanelID != panelID {
+				continue
+			}
+			cmdID, err := lvm.VM.Commands.SendTo(member.PluginID, member.DeviceID, member.EntityID, action, params)
+			if err != nil {
+				L.RaiseError("Panel.%s member %s/%s/%s: %s", action, member.PluginID, member.DeviceID, member.EntityID, err)
+				return 0
+			}
+			L.Push(lua.LString(cmdID))
+			return 1
+		}
+		L.RaiseError("Panel.%s: no member with panel_id %d", action, panelID)
+		return 0
+	}
+
+	L.SetField(panel, "On", L.NewFunction(func(L *lua.LState) int {
+		return sendToMembers(lightdomain.ActionTurnOn, nil)
+	}))
+	L.SetField(panel, "Off", L.NewFunction(func(L *lua.LState) int {
+		return sendToMembers(lightdomain.ActionTurnOff, nil)
+	}))
+	L.SetField(panel, "SetBrightness", L.NewFunction(func(L *lua.LState) int {
+		return sendToMembers(lightdomain.ActionSetBrightness, map[string]any{"brightness": int(L.CheckNumber(1))})
+	}))
+	L.SetField(panel, "Fill", L.NewFunction(func(L *lua.LState) int {
+		return sendToMembers(lightdomain.ActionSetRGB, map[string]any{"rgb": intsFromLuaTable(L, L.CheckTable(1))})
+	}))
+	L.SetField(panel, "SetPanel", L.NewFunction(func(L *lua.LState) int {
+		panelID := int(L.CheckNumber(1))
+		rgb := intsFromLuaTable(L, L.CheckTable(2))
+		return sendToPanel(panelID, lightdomain.ActionSetRGB, map[string]any{"rgb": rgb})
+	}))
+	L.SetField(panel, "Count", L.NewFunction(func(L *lua.LState) int {
+		members, err := lvm.panelMembers()
+		if err != nil {
+			L.Push(lua.LNumber(0))
+			return 1
+		}
+		L.Push(lua.LNumber(len(members)))
+		return 1
+	}))
+
+	L.SetGlobal("Panel", panel)
+}
+
+func (lvm *LuaVM) panelMembers() ([]panelMemberRef, error) {
+	raw, ok := lvm.VM.entity.Meta["panel_members"]
+	if !ok || len(raw) == 0 {
+		return nil, fmt.Errorf("entity %s has no panel_members meta", lvm.VM.entity.ID)
+	}
+	var members []panelMemberRef
+	if err := json.Unmarshal(raw, &members); err != nil {
+		return nil, err
+	}
+	return members, nil
 }
 
 func (lvm *LuaVM) stripMembers() ([]stripMemberRef, error) {

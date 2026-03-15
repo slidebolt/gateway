@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	lightdomain "github.com/slidebolt/sdk-entities/light"
+	lightpaneldomain "github.com/slidebolt/sdk-entities/light_panel"
 	lightstripdomain "github.com/slidebolt/sdk-entities/light_strip"
 	"github.com/slidebolt/sdk-types"
 )
@@ -219,6 +220,98 @@ LengthValue = Strip.Length()
 	}
 }
 
+func TestLuaVM_PanelHelpersDispatchCommands(t *testing.T) {
+	submitter := &helperTestSubmitter{}
+	entity := types.Entity{
+		ID:       "panel-1",
+		PluginID: "plugin-test",
+		DeviceID: "dev-1",
+		Domain:   lightpaneldomain.Type,
+		Meta: map[string]json.RawMessage{
+			"panel_members": json.RawMessage(`[
+				{"panel_id":10,"plugin_id":"plugin-a","device_id":"device-a","entity_id":"light-a"},
+				{"panel_id":20,"plugin_id":"plugin-b","device_id":"device-b","entity_id":"light-b"},
+				{"panel_id":30,"plugin_id":"plugin-c","device_id":"device-c","entity_id":"light-c"}
+			]`),
+		},
+	}
+	vm, err := NewLuaVM(entity, `
+Panel.On()
+Panel.Fill({10, 20, 30})
+Panel.SetPanel(20, {4, 5, 6})
+`, Services{
+		Commands: submitter,
+		Finder:   helperTestFinder{},
+		Bus:      helperTestBus{},
+		Timers:   NewOSTimerService(),
+	})
+	if err != nil {
+		t.Fatalf("NewLuaVM: %v", err)
+	}
+	defer vm.Stop()
+
+	// Panel.On() → 3 members; Panel.Fill() → 3 members; Panel.SetPanel(20) → 1 member = 7 total
+	if got := len(submitter.commands); got != 7 {
+		t.Fatalf("command count = %d, want 7", got)
+	}
+	for i := 0; i < 3; i++ {
+		if got := submitter.commands[i]["type"]; got != lightdomain.ActionTurnOn {
+			t.Fatalf("cmd[%d].type = %#v, want %q", i, got, lightdomain.ActionTurnOn)
+		}
+	}
+	for i := 3; i < 6; i++ {
+		if got := submitter.commands[i]["rgb"]; !equalAnySlice(got, []int{10, 20, 30}) {
+			t.Fatalf("cmd[%d].rgb = %#v, want [10 20 30]", i, got)
+		}
+	}
+	// Panel.SetPanel(20, ...) should target plugin-b/device-b/light-b
+	if got := submitter.commands[6]["type"]; got != lightdomain.ActionSetRGB {
+		t.Fatalf("cmd[6].type = %#v, want %q", got, lightdomain.ActionSetRGB)
+	}
+	if got := submitter.commands[6]["rgb"]; !equalAnySlice(got, []int{4, 5, 6}) {
+		t.Fatalf("cmd[6].rgb = %#v, want [4 5 6]", got)
+	}
+	if got := submitter.commands[6]["_plugin_id"]; got != "plugin-b" {
+		t.Fatalf("cmd[6] plugin = %#v, want plugin-b", got)
+	}
+	if got := submitter.commands[6]["_entity_id"]; got != "light-b" {
+		t.Fatalf("cmd[6] entity = %#v, want light-b", got)
+	}
+}
+
+func TestLuaVM_PanelCountReadsPanelMembersMeta(t *testing.T) {
+	entity := types.Entity{
+		ID:       "panel-1",
+		PluginID: "plugin-test",
+		DeviceID: "dev-1",
+		Domain:   lightpaneldomain.Type,
+		Meta: map[string]json.RawMessage{
+			"panel_members": json.RawMessage(`[
+				{"panel_id":10,"plugin_id":"a","device_id":"d1","entity_id":"e1"},
+				{"panel_id":20,"plugin_id":"a","device_id":"d2","entity_id":"e2"}
+			]`),
+		},
+	}
+	vm, err := NewLuaVM(entity, `CountValue = Panel.Count()`, Services{
+		Commands: &helperTestSubmitter{},
+		Finder:   helperTestFinder{},
+		Bus:      helperTestBus{},
+		Timers:   NewOSTimerService(),
+	})
+	if err != nil {
+		t.Fatalf("NewLuaVM: %v", err)
+	}
+	defer vm.Stop()
+
+	got, err := vm.GetGlobalNumber("CountValue")
+	if err != nil {
+		t.Fatalf("GetGlobalNumber: %v", err)
+	}
+	if got != 2 {
+		t.Fatalf("CountValue = %v, want 2", got)
+	}
+}
+
 func TestLuaVM_DomainHelpersOnlyInjectedForMatchingDomain(t *testing.T) {
 	entity := types.Entity{
 		ID:       "switch-1",
@@ -232,6 +325,9 @@ if Light ~= nil then
 end
 if Strip ~= nil then
   error("Strip helper should not be injected")
+end
+if Panel ~= nil then
+  error("Panel helper should not be injected")
 end
 `, Services{
 		Commands: &helperTestSubmitter{},

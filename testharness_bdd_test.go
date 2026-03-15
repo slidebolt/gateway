@@ -432,6 +432,32 @@ func (p *SimulatedPlugin) dispatch(method string, params json.RawMessage) (any, 
 		}
 		return nil, fmt.Errorf("entity not found")
 
+	case "devices/update":
+		var args types.Device
+		_ = json.Unmarshal(params, &args)
+		p.mu.Lock()
+		var updatedDev types.Device
+		foundDev := false
+		for i := range p.Devices {
+			d := &p.Devices[i]
+			if d.ID == args.ID {
+				if args.LocalName != "" {
+					d.LocalName = args.LocalName
+				}
+				if args.Labels != nil {
+					d.Labels = args.Labels
+				}
+				updatedDev = *d
+				foundDev = true
+				break
+			}
+		}
+		p.mu.Unlock()
+		if !foundDev {
+			return nil, fmt.Errorf("device not found: %s", args.ID)
+		}
+		return updatedDev, nil
+
 	case "entities/update":
 		var args types.Entity
 		_ = json.Unmarshal(params, &args)

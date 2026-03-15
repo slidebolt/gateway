@@ -32,6 +32,7 @@ func buildRouter() (*gin.Engine, huma.API) {
 
 	api := humagin.New(r, config)
 	registerRoutes(api)
+	registerCSVRoutes(r)
 	if historyService != nil {
 		historyService.RegisterRoutes(api)
 		r.GET("/api/topics/subscribe", historyService.SSEHandler())
