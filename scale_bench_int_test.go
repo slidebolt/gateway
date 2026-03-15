@@ -1,3 +1,5 @@
+//go:build integration
+
 package main
 
 // Scale benchmarks: gradually increase plugins, devices, entities, events and
