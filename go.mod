@@ -10,10 +10,10 @@ require (
 	github.com/nats-io/nats-server/v2 v2.12.5
 	github.com/nats-io/nats.go v1.49.0
 	github.com/slidebolt/plugin-automation v1.20.10
-	github.com/slidebolt/registry v0.0.9
-	github.com/slidebolt/sdk-entities v1.21.0
-	github.com/slidebolt/sdk-runner v1.20.10
-	github.com/slidebolt/sdk-types v1.20.9
+	github.com/slidebolt/registry v0.0.10
+	github.com/slidebolt/sdk-entities v1.21.1
+	github.com/slidebolt/sdk-runner v1.20.11
+	github.com/slidebolt/sdk-types v1.20.10
 	github.com/swaggo/swag v1.16.6
 	github.com/yuin/gopher-lua v1.1.1
 	modernc.org/sqlite v1.39.0
