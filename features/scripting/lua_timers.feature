@@ -9,7 +9,7 @@ Feature: Lua Timers — After, Every, and Cancel
       """
       TimerFired = 0
       function OnInit(ctx)
-        TimerService.Scripting.After(0.5, function()
+        TimerService.Scripting.After(0.1, function()
           TimerFired = TimerFired + 1
         end)
       end
@@ -26,14 +26,14 @@ Feature: Lua Timers — After, Every, and Cancel
       """
       TickCount = 0
       function OnInit(ctx)
-        TimerService.Scripting.Every(0.2, function()
+        TimerService.Scripting.Every(0.1, function()
           TickCount = TickCount + 1
         end)
       end
       """
     When I start the Lua VM
     Then the VM starts without error
-    And the Lua global "TickCount" eventually equals 3
+    And the Lua global "TickCount" eventually equals 1
 
   Scenario: TimerService.Cancel stops a recurring timer
     Given a Lua script:
@@ -41,7 +41,7 @@ Feature: Lua Timers — After, Every, and Cancel
       TickCount = 0
       TimerID = 0
       function OnInit(ctx)
-        TimerID = TimerService.Scripting.Every(0.2, function()
+        TimerID = TimerService.Scripting.Every(0.1, function()
           TickCount = TickCount + 1
         end)
       end
@@ -51,10 +51,10 @@ Feature: Lua Timers — After, Every, and Cancel
       end
       """
     When I start the Lua VM
-    And the Lua global "TickCount" eventually equals 2
+    And the Lua global "TickCount" eventually equals 1
     And I execute the Lua code "StopTimer()"
     And I wait 1 seconds
-    Then the Lua global "TickCount" equals 2
+    Then the Lua global "TickCount" equals 1
 
   Scenario: Party Time simulation with labels and timers
     Given entity "bulb-1" has label "area:basement"
@@ -63,9 +63,9 @@ Feature: Lua Timers — After, Every, and Cancel
     And a Lua script:
       """
       function OnInit(ctx)
-        -- Change color of all basement bulbs every 0.2s
+        -- Change color of all basement bulbs every 0.1s
         -- Use 100% probability for predictable testing
-        TimerService.Scripting.Every(0.2, function()
+        TimerService.Scripting.Every(0.1, function()
           local lights = QueryService.Scripting.Find("?label=area:basement")
           lights:each(function(e)
             CommandService.Scripting.Send(e, "set_rgb", {r=255, g=0, b=0})

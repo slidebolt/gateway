@@ -74,11 +74,11 @@ func newLuaVM(entity types.Entity, source string, inst ScriptInstance, svc Servi
 			sessionID: inst.SessionID,
 			svc:       svc,
 			ctx:       ctx,
-			cancel:    cancel,
-			work:      make(chan workItem, 64),
-			done:      make(chan struct{}),
-			This:      newEntityBinding(entity, cmds, evts),
-			Query:     newQueryScripting(svc.Finder),
+			cancel:   cancel,
+			work:     make(chan workItem, 64),
+			done:     make(chan struct{}),
+			This:     newEntityBinding(entity, cmds, evts, svc.Finder),
+			Query:    newQueryScripting(svc.Finder),
 			Commands:  cmds,
 			Events:    evts,
 		},
@@ -89,7 +89,7 @@ func newLuaVM(entity types.Entity, source string, inst ScriptInstance, svc Servi
 	lvm.VM.Timers = newTimerScripting(lvm.VM, svc.Timers)
 
 	// Wire runOnInit to our Lua executor.
-	lvm.VM.runOnInit = lvm.execOnInit
+	lvm.VM.runOnInit = lvm.ExecOnInit
 
 	// Inject all Lua bindings.
 	lvm.injectBindings()
@@ -100,7 +100,7 @@ func newLuaVM(entity types.Entity, source string, inst ScriptInstance, svc Servi
 	// Execute the source + call OnInit under a deadline.
 	errc := make(chan error, 1)
 	lvm.VM.work <- workItem{
-		fn:   lvm.execOnInit,
+		fn:   lvm.ExecOnInit,
 		errc: errc,
 	}
 	select {
@@ -132,7 +132,7 @@ func (lvm *LuaVM) Stop() {
 
 // execOnInit runs the source and calls OnInit(ctx) if defined.
 // Must be called on the work-queue goroutine.
-func (lvm *LuaVM) execOnInit() error {
+func (lvm *LuaVM) ExecOnInit() error {
 	ctx, cancel := context.WithTimeout(lvm.VM.ctx, defaultDeadline)
 	lvm.L.SetContext(ctx)
 	// Restore the long-lived context after OnInit so subsequent event callbacks
@@ -577,6 +577,15 @@ func (lvm *LuaVM) injectThis() {
 			return 1
 		}
 		L.Push(mapToTable(L, m))
+		return 1
+	}))
+
+	L.SetField(t, "GetLabels", L.NewFunction(func(L *lua.LState) int {
+		if this.Entity.Labels == nil {
+			L.Push(L.NewTable())
+			return 1
+		}
+		L.Push(labelsToTable(L, this.Entity.Labels))
 		return 1
 	}))
 
@@ -1054,6 +1063,18 @@ func sliceToTable(L *lua.LState, values []any) *lua.LTable {
 	t := L.NewTable()
 	for i, v := range values {
 		L.RawSetInt(t, i+1, goToLua(L, v))
+	}
+	return t
+}
+
+func labelsToTable(L *lua.LState, labels map[string][]string) *lua.LTable {
+	t := L.NewTable()
+	for k, vs := range labels {
+		vt := L.NewTable()
+		for i, v := range vs {
+			L.RawSetInt(vt, i+1, lua.LString(v))
+		}
+		L.SetField(t, k, vt)
 	}
 	return t
 }

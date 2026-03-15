@@ -59,6 +59,7 @@ type TimerService interface {
 	After(d time.Duration, fn func()) TimerID
 	Every(d time.Duration, fn func()) TimerID
 	Cancel(id TimerID)
+	Clear()
 }
 
 // ScriptController manages child script instances spawned from a host script.
@@ -164,11 +165,7 @@ func (f SubjectFilter) Matches(env types.EntityEventEnvelope) bool {
 		if f.query.PluginID != "" && env.PluginID != f.query.PluginID {
 			return false
 		}
-		// Label filter requires the entity — we only have the envelope here.
-		// Labels on the envelope aren't part of EntityEventEnvelope, so label
-		// filtering is best-effort: skip at envelope level (always match) and
-		// let callers do a secondary FindEntities check when needed.
-		return true
+		// Label filter check is handled in OnEvent via e.finder.FindEntities
 	}
 
 	if f.entityID != "" && f.entityID != "*" {
@@ -178,12 +175,17 @@ func (f SubjectFilter) Matches(env types.EntityEventEnvelope) bool {
 	}
 	if f.evtType != "" && f.evtType != "*" {
 		var payload map[string]any
-		_ = json.Unmarshal(env.Payload, &payload)
-		t, _ := payload["type"].(string)
-		if t != f.evtType {
+		if json.Unmarshal(env.Payload, &payload) == nil {
+			t, _ := payload["type"].(string)
+			if t != f.evtType {
+				return false
+			}
+		} else {
+			// If we can't unmarshal but a specific type was requested, it's a mismatch
 			return false
 		}
 	}
+
 	return true
 }
 
@@ -461,6 +463,7 @@ type EntityBinding struct {
 
 	commands *CommandScripting
 	events   *EventScripting
+	finder   EntityFinder
 
 	// Per-command-name callbacks registered by This.OnCommand(name, fn).
 	commandHandlers map[string]func(IncomingCommand)
@@ -470,17 +473,18 @@ type EntityBinding struct {
 }
 
 // newEntityBinding constructs a This for the given entity and services.
-func newEntityBinding(entity types.Entity, cmds *CommandScripting, evts *EventScripting) *EntityBinding {
+func newEntityBinding(entity types.Entity, cmds *CommandScripting, evts *EventScripting, finder EntityFinder) *EntityBinding {
 	return &EntityBinding{
 		Entity:   entity,
 		commands: cmds,
 		events:   evts,
+		finder:   finder,
 	}
 }
 
 // NewEntityBinding is the exported constructor for use in tests.
-func NewEntityBinding(entity types.Entity, cmds *CommandScripting, evts *EventScripting) *EntityBinding {
-	return newEntityBinding(entity, cmds, evts)
+func NewEntityBinding(entity types.Entity, cmds *CommandScripting, evts *EventScripting, finder EntityFinder) *EntityBinding {
+	return newEntityBinding(entity, cmds, evts, finder)
 }
 
 // SendCommand dispatches a command to this entity.
@@ -503,6 +507,18 @@ func (b *EntityBinding) SendEvent(payload map[string]any) error {
 		CreatedAt:  time.Now().UTC(),
 	}
 	return b.events.Publish(env)
+}
+
+// GetLabels returns the current labels for the bound entity from the registry.
+func (b *EntityBinding) GetLabels() map[string][]string {
+	if b.finder == nil {
+		return b.Entity.Labels
+	}
+	list := b.finder.FindEntities(types.SearchQuery{EntityID: b.Entity.ID})
+	if len(list) == 0 {
+		return b.Entity.Labels
+	}
+	return list[0].Labels
 }
 
 // OnEvent subscribes to events for this entity (subject defaults to "entityID.*").

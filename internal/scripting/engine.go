@@ -89,7 +89,7 @@ func newVM(entity types.Entity, source string, svc Services) (*VM, error) {
 		cancel:   cancel,
 		work:     make(chan workItem, 64),
 		done:     make(chan struct{}),
-		This:     newEntityBinding(entity, cmds, evts),
+		This:     newEntityBinding(entity, cmds, evts, svc.Finder),
 		Query:    newQueryScripting(svc.Finder),
 		Commands: cmds,
 		Events:   evts,
@@ -202,7 +202,7 @@ func (t *TimerScripting) Every(d time.Duration, fn func()) TimerID {
 }
 
 func (t *TimerScripting) Cancel(id TimerID) {
-	if t.shared == nil {
+	if t == nil || t.shared == nil {
 		return
 	}
 	t.shared.Cancel(id)
@@ -210,6 +210,8 @@ func (t *TimerScripting) Cancel(id TimerID) {
 	delete(t.ids, id)
 	t.mu.Unlock()
 }
+
+func (t *TimerScripting) Clear() {}
 
 func (t *TimerScripting) Stop() {
 	if t == nil || t.shared == nil {
@@ -285,6 +287,15 @@ func (s *osTimerService) Cancel(id TimerID) {
 	s.mu.Unlock()
 	if ok {
 		h.stop()
+	}
+}
+
+func (s *osTimerService) Clear() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for id, h := range s.timers {
+		h.stop()
+		delete(s.timers, id)
 	}
 }
 

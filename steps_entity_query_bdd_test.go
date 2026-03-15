@@ -1,3 +1,5 @@
+//go:build bdd
+
 package main
 
 // BDD step definitions for the Device EntityQuery feature.

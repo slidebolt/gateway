@@ -1,3 +1,5 @@
+//go:build bdd
+
 package main
 
 // Pass 1 BDD step definitions for the scripting API — no Lua involved.
@@ -24,8 +26,9 @@ import (
 
 // memoryBus is a synchronous, in-memory pub/sub bus satisfying scripting.EventBus.
 type memoryBus struct {
-	mu   sync.Mutex
-	subs map[string][]*memorySub
+	mu      sync.Mutex
+	subs    map[string][]*memorySub
+	history []types.EntityEventEnvelope
 }
 
 func newMemoryBus() *memoryBus { return &memoryBus{subs: make(map[string][]*memorySub)} }
@@ -40,15 +43,34 @@ func (b *memoryBus) Subscribe(subject string, handler func([]byte)) (scripting.S
 
 func (b *memoryBus) Publish(subject string, data []byte) error {
 	b.mu.Lock()
+	// Record history first
+	if subject == types.SubjectEntityEvents {
+		var env types.EntityEventEnvelope
+		if json.Unmarshal(data, &env) == nil {
+			b.history = append(b.history, env)
+		}
+	}
+
+	// Capture subscribers
 	subs := make([]*memorySub, len(b.subs[subject]))
 	copy(subs, b.subs[subject])
 	b.mu.Unlock()
+
+	// Call handlers synchronously
 	for _, s := range subs {
 		if !s.unsubscribed {
 			s.handler(data)
 		}
 	}
 	return nil
+}
+
+func (b *memoryBus) allEvents() []types.EntityEventEnvelope {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	out := make([]types.EntityEventEnvelope, len(b.history))
+	copy(out, b.history)
+	return out
 }
 
 func (b *memoryBus) remove(sub *memorySub) {
@@ -79,10 +101,13 @@ func (s *memorySub) Unsubscribe() error {
 
 // memoryFinder holds a fixed set of entities and satisfies scripting.EntityFinder.
 type memoryFinder struct {
+	mu       sync.RWMutex
 	entities []types.Entity
 }
 
 func (f *memoryFinder) FindEntities(q types.SearchQuery) []types.Entity {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
 	var out []types.Entity
 	for _, e := range f.entities {
 		if q.Domain != "" && !strings.EqualFold(e.Domain, q.Domain) {
@@ -227,17 +252,21 @@ type scriptingTestCtx struct {
 	commandService *scripting.CommandScripting
 	eventService   *scripting.EventScripting
 
+	// event history for assertions
+	eventsMu sync.Mutex
+	events   []types.EntityEventEnvelope
+
 	// bound entity for This tests
 	binding *scripting.EntityBinding
 
 	// query results
-	lastList       scripting.EntityList
+	lastList         scripting.EntityList
 	lastSingleEntity *types.Entity
-	lastFindOneErr error
-	lastSendErr    error
-	lastCmdID      string
-	lastSendToErr  error
-	sendToCmdCount int
+	lastFindOneErr   error
+	lastSendErr      error
+	lastCmdID        string
+	lastSendToErr    error
+	sendToCmdCount   int
 
 	// event subscription tracking — named subscriptions
 	subs     map[string]scripting.Subscription
@@ -261,25 +290,26 @@ func newScriptingTestCtx() *scriptingTestCtx {
 	finder := &memoryFinder{}
 	submitter := newMemorySubmitter()
 	bus := newMemoryBus()
-	svc := scripting.Services{
-		Commands: submitter,
-		Finder:   finder,
-		Bus:      bus,
-		Timers:   scripting.NewOSTimerService(),
-	}
-	return &scriptingTestCtx{
+	sc := &scriptingTestCtx{
 		finder:          finder,
 		submitter:       submitter,
 		bus:             bus,
-		svc:             svc,
-		queryService:    scripting.NewQueryScripting(finder),
-		commandService:  scripting.NewCommandScripting(submitter),
-		eventService:    scripting.NewEventScripting(bus, finder),
 		subs:            make(map[string]scripting.Subscription),
 		counters:        make(map[string]*atomic.Int64),
 		handlerCounters: make(map[string]*atomic.Int64),
 		anonCounter:     &atomic.Int64{},
 	}
+	sc.svc = scripting.Services{
+		Commands: submitter,
+		Finder:   finder,
+		Bus:      bus,
+		Timers:   scripting.NewOSTimerService(),
+	}
+	sc.queryService = scripting.NewQueryScripting(finder)
+	sc.commandService = scripting.NewCommandScripting(submitter)
+	sc.eventService = scripting.NewEventScripting(bus, finder)
+
+	return sc
 }
 
 func (sc *scriptingTestCtx) counter(name string) *atomic.Int64 {
@@ -423,7 +453,7 @@ func aScriptingEnvironmentWithEntityOfDomain(ctx context.Context, entityID, doma
 		Labels: make(map[string][]string),
 	}
 	sc.finder.entities = []types.Entity{entity}
-	sc.binding = scripting.NewEntityBinding(entity, sc.commandService, sc.eventService)
+	sc.binding = scripting.NewEntityBinding(entity, sc.commandService, sc.eventService, sc.finder)
 	sc.anonCtx, sc.anonCancel = context.WithCancel(context.Background())
 	return context.WithValue(ctx, scriptingCtxKey{}, sc), nil
 }
@@ -601,6 +631,32 @@ func theRecordedCommandCountIsAtLeast(ctx context.Context, count int) error {
 	sc.submitter.mu.Unlock()
 	if n < count {
 		return fmt.Errorf("expected at least %d commands recorded, got %d", count, n)
+	}
+	return nil
+}
+
+func theRecordedEventCountIsAtLeast(ctx context.Context, count int) error {
+	sc := scriptingCtxFrom(ctx)
+	n := len(sc.bus.allEvents())
+	if n < count {
+		return fmt.Errorf("expected at least %d events recorded, got %d", count, n)
+	}
+	return nil
+}
+
+func theRecordedEventCountForIsAtLeast(ctx context.Context, eventType string, count int) error {
+	sc := scriptingCtxFrom(ctx)
+	history := sc.bus.allEvents()
+	n := 0
+	for _, env := range history {
+		var payload map[string]any
+		_ = json.Unmarshal(env.Payload, &payload)
+		if t, _ := payload["type"].(string); t == eventType {
+			n++
+		}
+	}
+	if n < count {
+		return fmt.Errorf("expected at least %d events of type %q, got %d", count, eventType, n)
 	}
 	return nil
 }
@@ -1016,6 +1072,14 @@ func theRecordedCommandOnWithDomainHasRGBArray(ctx context.Context, entityID, do
 }
 
 func registerScriptingAPISteps(sc *godog.ScenarioContext) {
+	sc.After(func(ctx context.Context, scenario *godog.Scenario, err error) (context.Context, error) {
+		sctx := scriptingCtxFrom(ctx)
+		if sctx != nil && sctx.svc.Timers != nil {
+			sctx.svc.Timers.Clear()
+		}
+		return ctx, nil
+	})
+
 	// Background
 	sc.Step(`^a scripting query environment with 3 plugins and mixed domains$`, aScriptingQueryEnvironmentWith3PluginsAndMixedDomains)
 	sc.Step(`^a scripting command environment with 1 plugin and 2 entities$`, aScriptingCommandEnvironmentWith1PluginAnd2Entities)
@@ -1064,6 +1128,8 @@ func registerScriptingAPISteps(sc *godog.ScenarioContext) {
 	sc.Step(`^I unsubscribe "([^"]*)"$`, iUnsubscribe)
 	sc.Step(`^subscribing afterwards receives (\d+) historical events$`, subscribingAfterwardsReceivesHistoricalEvents)
 	sc.Step(`^I publish an event for "([^"]*)" type "([^"]*)"$`, iPublishAnEventForType)
+	sc.Step(`^the recorded event count is at least (\d+)$`, theRecordedEventCountIsAtLeast)
+	sc.Step(`^the recorded event count for "([^"]*)" is at least (\d+)$`, theRecordedEventCountForIsAtLeast)
 
 	// This (EntityBinding)
 	sc.Step(`^I have a subscription on "([^"]*)"$`, iHaveASubscriptionOn)
