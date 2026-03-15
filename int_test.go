@@ -496,4 +496,3 @@ func TestIntegration_CommandFilter_FallThroughUnmatchedCommand(t *testing.T) {
 		}
 	}
 }
-

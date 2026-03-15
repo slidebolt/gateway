@@ -42,4 +42,3 @@ func registerEventRoutes(api huma.API) {
 		return &IngestEventOutput{Body: ent}, nil
 	})
 }
-

@@ -24,11 +24,14 @@ func registerBroadSearchSteps(sc *godog.ScenarioContext) {
 
 // stepScaleSetup creates N plugins, each with D devices, each device with E entities.
 // Naming: plugin-01 … plugin-N
-//   device: plugin-01-device-01 … plugin-01-device-D
-//   entity: plugin-01-device-01-entity-01 … plugin-01-device-01-entity-E
+//
+//	device: plugin-01-device-01 … plugin-01-device-D
+//	entity: plugin-01-device-01-entity-01 … plugin-01-device-01-entity-E
+//
 // Labels (per entity from plugin P, device D):
-//   Plugin : Plugin-P   (e.g. Plugin-01)
-//   Device : plugin-P-device-D (globally unique device identifier)
+//
+//	Plugin : Plugin-P   (e.g. Plugin-01)
+//	Device : plugin-P-device-D (globally unique device identifier)
 func stepScaleSetup(ctx context.Context, nPlugins, nDevices, nEntities int) (context.Context, error) {
 	w := worldFrom(ctx)
 

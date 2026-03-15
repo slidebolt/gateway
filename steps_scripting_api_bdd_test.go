@@ -407,22 +407,22 @@ func aScriptingEnvironmentWithCapabilityAwareEntities(ctx context.Context) (cont
 	sc := newScriptingTestCtx()
 	sc.finder.entities = []types.Entity{
 		{
-			ID:      "e-rgb-light",
-			Domain:  "light",
+			ID:       "e-rgb-light",
+			Domain:   "light",
 			PluginID: "plugin-1",
 			DeviceID: "device-1",
-			Actions: []string{"turn_on", "turn_off", "set_rgb", "set_brightness"},
+			Actions:  []string{"turn_on", "turn_off", "set_rgb", "set_brightness"},
 		},
 		{
-			ID:      "e-switch",
-			Domain:  "switch",
+			ID:       "e-switch",
+			Domain:   "switch",
 			PluginID: "plugin-1",
 			DeviceID: "device-1",
-			Actions: []string{"turn_on", "turn_off"},
+			Actions:  []string{"turn_on", "turn_off"},
 		},
 		{
-			ID:     "e-bare",
-			Domain: "sensor",
+			ID:       "e-bare",
+			Domain:   "sensor",
 			PluginID: "plugin-1",
 			DeviceID: "device-1",
 			// No Actions — represents a device that hasn't advertised capabilities.

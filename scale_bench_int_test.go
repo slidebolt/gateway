@@ -45,9 +45,9 @@ type scaleConfig struct {
 }
 
 var scaleLevels = []scaleConfig{
-	{plugins: 1,    devicesPerPlugin: 1, entitiesPerDevice: 5, eventsPerEntity: 3, dynamicSubs: 1},
-	{plugins: 10,   devicesPerPlugin: 1, entitiesPerDevice: 5, eventsPerEntity: 3, dynamicSubs: 5},
-	{plugins: 100,  devicesPerPlugin: 1, entitiesPerDevice: 5, eventsPerEntity: 3, dynamicSubs: 10},
+	{plugins: 1, devicesPerPlugin: 1, entitiesPerDevice: 5, eventsPerEntity: 3, dynamicSubs: 1},
+	{plugins: 10, devicesPerPlugin: 1, entitiesPerDevice: 5, eventsPerEntity: 3, dynamicSubs: 5},
+	{plugins: 100, devicesPerPlugin: 1, entitiesPerDevice: 5, eventsPerEntity: 3, dynamicSubs: 10},
 	{plugins: 1000, devicesPerPlugin: 1, entitiesPerDevice: 5, eventsPerEntity: 3, dynamicSubs: 20},
 }
 

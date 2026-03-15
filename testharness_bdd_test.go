@@ -169,7 +169,6 @@ func (h *Harness) PostWithHeaders(path string, body any, headers map[string]stri
 	return http.DefaultClient.Do(req)
 }
 
-
 func (h *Harness) Delete(path string) (*http.Response, error) {
 	req, err := http.NewRequest(http.MethodDelete, h.Server.URL+path, nil)
 	if err != nil {
@@ -393,7 +392,9 @@ func (p *SimulatedPlugin) dispatch(method string, params json.RawMessage) (any, 
 		return p.Devices, nil
 
 	case "devices/get":
-		var args struct{ ID string `json:"id"` }
+		var args struct {
+			ID string `json:"id"`
+		}
 		_ = json.Unmarshal(params, &args)
 		for _, d := range p.Devices {
 			if d.ID == args.ID {
@@ -403,7 +404,9 @@ func (p *SimulatedPlugin) dispatch(method string, params json.RawMessage) (any, 
 		return nil, fmt.Errorf("device not found")
 
 	case "entities/list":
-		var args struct{ DeviceID string `json:"device_id"` }
+		var args struct {
+			DeviceID string `json:"device_id"`
+		}
 		_ = json.Unmarshal(params, &args)
 		if args.DeviceID == "" {
 			return p.Entities, nil
@@ -478,7 +481,9 @@ func (p *SimulatedPlugin) dispatch(method string, params json.RawMessage) (any, 
 		return status, nil
 
 	case "commands/status/get":
-		var args struct{ CommandID string `json:"command_id"` }
+		var args struct {
+			CommandID string `json:"command_id"`
+		}
 		_ = json.Unmarshal(params, &args)
 		p.mu.RLock()
 		st, ok := p.commands[args.CommandID]

@@ -32,9 +32,9 @@ func (p *findEntitiesPlugin) Initialize(ctx runner.PluginContext) (types.Manifes
 	}
 	return types.Manifest{ID: p.id, Name: p.id, Version: "1.0.0", Schemas: types.CoreDomains()}, nil
 }
-func (p *findEntitiesPlugin) Start(_ context.Context) error          { return nil }
-func (p *findEntitiesPlugin) Stop() error                            { return nil }
-func (p *findEntitiesPlugin) OnReset() error                         { return nil }
+func (p *findEntitiesPlugin) Start(_ context.Context) error               { return nil }
+func (p *findEntitiesPlugin) Stop() error                                 { return nil }
+func (p *findEntitiesPlugin) OnReset() error                              { return nil }
 func (p *findEntitiesPlugin) OnCommand(types.Command, types.Entity) error { return nil }
 
 // startFindEntitiesPlugin boots a runner-backed plugin in a goroutine and

@@ -91,4 +91,3 @@ func registerCommandRoutes(api huma.API) {
 		return &CommandStatusOutput{Body: status}, nil
 	})
 }
-

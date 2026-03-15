@@ -12,37 +12,37 @@ import (
 // Using embedding + a field named "Schema" triggers a reflect.StructOf duplicate
 // field panic in Huma's OpenAPI schema generator.
 type EntityResponse struct {
-	ID           string                          `json:"id"`
-	SourceID     string                          `json:"source_id,omitempty"`
-	SourceName   string                          `json:"source_name,omitempty"`
-	DeviceID     string                          `json:"device_id"`
-	Domain       string                          `json:"domain"`
-	LocalName    string                          `json:"local_name"`
-	Actions      []string                        `json:"actions,omitempty"`
-	Data         types.EntityData                `json:"data"`
-	Labels       map[string][]string             `json:"labels,omitempty"`
-	Snapshots    map[string]types.EntitySnapshot `json:"snapshots,omitempty"`
+	ID            string                          `json:"id"`
+	SourceID      string                          `json:"source_id,omitempty"`
+	SourceName    string                          `json:"source_name,omitempty"`
+	DeviceID      string                          `json:"device_id"`
+	Domain        string                          `json:"domain"`
+	LocalName     string                          `json:"local_name"`
+	Actions       []string                        `json:"actions,omitempty"`
+	Data          types.EntityData                `json:"data"`
+	Labels        map[string][]string             `json:"labels,omitempty"`
+	Snapshots     map[string]types.EntitySnapshot `json:"snapshots,omitempty"`
 	CommandQuery  *types.SearchQuery              `json:"command_query,omitempty"`
 	CommandFilter []string                        `json:"command_filter,omitempty"`
-	Meta         map[string]json.RawMessage      `json:"meta,omitempty"`
-	DomainSchema *types.DomainDescriptor         `json:"schema,omitempty"`
+	Meta          map[string]json.RawMessage      `json:"meta,omitempty"`
+	DomainSchema  *types.DomainDescriptor         `json:"schema,omitempty"`
 }
 
 func toEntityResponse(e types.Entity) EntityResponse {
 	r := EntityResponse{
-		ID:           e.ID,
-		SourceID:     e.SourceID,
-		SourceName:   e.SourceName,
-		DeviceID:     e.DeviceID,
-		Domain:       e.Domain,
-		LocalName:    e.LocalName,
-		Actions:      e.Actions,
-		Data:         e.Data,
-		Labels:       e.Labels,
-		Snapshots:    e.Snapshots,
+		ID:            e.ID,
+		SourceID:      e.SourceID,
+		SourceName:    e.SourceName,
+		DeviceID:      e.DeviceID,
+		Domain:        e.Domain,
+		LocalName:     e.LocalName,
+		Actions:       e.Actions,
+		Data:          e.Data,
+		Labels:        e.Labels,
+		Snapshots:     e.Snapshots,
 		CommandQuery:  e.CommandQuery,
 		CommandFilter: e.CommandFilter,
-		Meta:         e.Meta,
+		Meta:          e.Meta,
 	}
 	if desc, ok := types.GetDomainDescriptor(e.Domain); ok {
 		filtered := filterDescriptor(desc, e.Actions)

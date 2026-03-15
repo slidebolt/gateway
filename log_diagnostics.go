@@ -94,4 +94,3 @@ func logDiskWriteSummary(stats map[string]diskWriteCounter) {
 		slog.Debug("disk write summary", "window", "10s", "file", path, "writes", s.writes, "bytes_written", s.bytesWritten, "unchanged_writes", s.unchangedWrite)
 	}
 }
-

@@ -601,7 +601,9 @@ func (h *History) traceSince(pluginID, deviceID, entityID string, since time.Tim
 		t, _ := time.Parse(time.RFC3339Nano, createdAt)
 		name := ""
 		if payload != "" {
-			var p struct{ Type string `json:"type"` }
+			var p struct {
+				Type string `json:"type"`
+			}
 			if json.Unmarshal([]byte(payload), &p) == nil {
 				name = p.Type
 			}
@@ -644,7 +646,9 @@ func (h *History) traceSince(pluginID, deviceID, entityID string, since time.Tim
 		}
 		name := ""
 		if cmdPayload != "" {
-			var p struct{ Type string `json:"type"` }
+			var p struct {
+				Type string `json:"type"`
+			}
 			if json.Unmarshal([]byte(cmdPayload), &p) == nil {
 				name = p.Type
 			}

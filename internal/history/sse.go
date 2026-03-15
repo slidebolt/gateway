@@ -63,7 +63,8 @@ func (b *sseBroker) broadcast(msg sseMessage) {
 }
 
 // SSEHandler returns a Gin handler for the Server-Sent Events stream.
-func (h *History) SSEHandler() gin.HandlerFunc {	return func(c *gin.Context) {
+func (h *History) SSEHandler() gin.HandlerFunc {
+	return func(c *gin.Context) {
 		c.Header("Content-Type", "text/event-stream")
 		c.Header("Cache-Control", "no-cache")
 		c.Header("Connection", "keep-alive")

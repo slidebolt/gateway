@@ -24,14 +24,14 @@ import (
 // ---------------------------------------------------------------------------
 
 type luaState struct {
-	vms          map[string]*scripting.LuaVM  // named VMs
-	entityVMs    map[string]*scripting.LuaVM  // entity-ID → VM
-	namedSources map[string]string            // VM name → source
-	currentSrc   string                       // current unnamed script
-	lastVM       *scripting.LuaVM             // last started (unnamed)
-	lastEntity   types.Entity                 // entity for last started VM
-	lastVMErr    error                        // error from last start
-	broadcastVMs []*scripting.LuaVM           // for bulk integration tests
+	vms          map[string]*scripting.LuaVM // named VMs
+	entityVMs    map[string]*scripting.LuaVM // entity-ID → VM
+	namedSources map[string]string           // VM name → source
+	currentSrc   string                      // current unnamed script
+	lastVM       *scripting.LuaVM            // last started (unnamed)
+	lastEntity   types.Entity                // entity for last started VM
+	lastVMErr    error                       // error from last start
+	broadcastVMs []*scripting.LuaVM          // for bulk integration tests
 }
 
 type luaStateKey struct{}
@@ -638,7 +638,9 @@ func registerScriptingLuaSteps(sc *godog.ScenarioContext) {
 	sc.Step(`^all (\d+) VMs start simultaneously$`, whenAllVMsStartSimultaneously)
 	sc.Step(`^I start 3 Lua VMs for 3 different entities$`, iStart3LuaVMsFor3DifferentEntities)
 	sc.Step(`^(\d+) Lua VMs for entity "([^"]*)"$`, givenNLuaVMsForEntity)
-	sc.Step(`^(\d+) Lua VMs for (\d+) different entities$`, func(ctx context.Context, n, m int) (context.Context, error) { return givenNLuaVMsForNDifferentEntities(ctx, n) })
+	sc.Step(`^(\d+) Lua VMs for (\d+) different entities$`, func(ctx context.Context, n, m int) (context.Context, error) {
+		return givenNLuaVMsForNDifferentEntities(ctx, n)
+	})
 	sc.Step(`^10 Lua VMs each subscribing to wildcard events$`, given10LuaVMsEachSubscribingToWildcardEvents)
 	sc.Step(`^10 Lua VMs each sending a command on init$`, given10LuaVMsEachSendingACommandOnInit)
 	sc.Step(`^I dispatch command "([^"]*)" to entity "([^"]*)" via the binding$`, iDispatchCommandToEntityViaTheBinding)
