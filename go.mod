@@ -9,7 +9,7 @@ require (
 	github.com/mark3labs/mcp-go v0.44.1
 	github.com/nats-io/nats-server/v2 v2.12.5
 	github.com/nats-io/nats.go v1.49.0
-	github.com/slidebolt/plugin-automation v0.0.0
+	github.com/slidebolt/plugin-automation v1.20.10
 	github.com/slidebolt/registry v0.0.7
 	github.com/slidebolt/sdk-entities v1.20.6
 	github.com/slidebolt/sdk-runner v1.20.9
@@ -70,7 +70,6 @@ require (
 	github.com/quic-go/quic-go v0.59.0 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
 	github.com/robfig/cron/v3 v3.0.1 // indirect
-	github.com/slidebolt/sdk-integration-testing v0.0.7
 	github.com/spf13/cast v1.7.1 // indirect
 	github.com/spf13/pflag v1.0.10 // indirect
 	github.com/twitchyliquid64/golang-asm v0.15.1 // indirect
