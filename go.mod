@@ -19,7 +19,6 @@ require (
 	modernc.org/sqlite v1.39.0
 )
 
-replace github.com/slidebolt/plugin-automation => ../plugin-automation
 
 require (
 	github.com/KyleBanks/depth v1.2.1 // indirect
@@ -96,10 +95,6 @@ require (
 	modernc.org/memory v1.11.0 // indirect
 )
 
-replace github.com/slidebolt/sdk-types => ../sdk-types
 
-replace github.com/slidebolt/registry => ../registry
 
-replace github.com/slidebolt/sdk-entities => ../sdk-entities
 
-replace github.com/slidebolt/sdk-runner => ../sdk-runner
